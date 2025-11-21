@@ -1,0 +1,8 @@
+numpy
+argparse
+opencv-python
+ipdb
+cospgd
+PyYAML
+scipy
+tensorboardX
