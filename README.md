@@ -1,14 +1,10 @@
 # PLEASE NOTE: This repository is a fork from:
 
 # [Dynamic Divide-and-Conquer Adversarial Training for Robust Semantic Segmentation](https://github.com/dvlab-research/Robust-Semantic-Segmentation)
+## [Original Repository](https://github.com/dvlab-research/Robust-Semantic-Segmentation)
+# [CosPGD: an efficient white-box adversarial attack for pixel-wise prediction tasks](https://arxiv.org/pdf/2302.02213)
+## [CosPGD](https://github.com/shashankskagnihotri/cospgd),[DDCAT - CosPGD](https://github.com/shashankskagnihotri/adv-corrected-ddcat-cospgd)
 
-# Here we correct the white-box attack implementations done in the [Original Repository](https://github.com/dvlab-research/Robust-Semantic-Segmentation).
-
-## Specifically we make changes only to tool_test/voc2012 files pertaining to the PSPNet implementation and extend the repository to include [PGD](https://arxiv.org/pdf/1706.06083.pdf), [SegPGD](https://arxiv.org/abs/2207.12391) and [CosPGD](https://arxiv.org/abs/2302.02213) attacks.
-
-This is a pytorch project for the paper **Dynamic Divide-and-Conquer Adversarial Training for Robust Semantic Segmentation** by Xiaogang Xu, Hengshuang Zhao and Jiaya Jia presented at **ICCV2021**.
-
-[paper link](https://jiaya.me/publication/), [arxiv](https://arxiv.org/pdf/2003.06555)
 
 ## Introduction
 Adversarial training is promising for improving the robustness of deep neural networks towards adversarial perturbations, especially on the classification task. The effect of this type of training on semantic segmentation, contrarily, just commences.
