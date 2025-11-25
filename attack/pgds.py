@@ -1,3 +1,5 @@
+import cv2
+import numpy as np
 import torch
 import math
 import torch.nn.functional as F
@@ -38,36 +40,49 @@ class Attack:
         if clamp_max == 1:
             assert epsilon == 0.03 and alpha==0.01, "[0,1] epsilon should be 0.03, alpha should be 0.01"
             sign_data_grad = alpha * data_grad.sign()
-            unnorm_perturbed_image = perturbed_image.detach()
+            unnorm_perturbed_image = perturbed_image.detach().clone()
             unnorm_perturbed_image[:, 0, :, :] = unnorm_perturbed_image[:, 0, :, :] * std[0] + mean[0]
             unnorm_perturbed_image[:, 1, :, :] = unnorm_perturbed_image[:, 1, :, :] * std[1] + mean[1]
             unnorm_perturbed_image[:, 2, :, :] = unnorm_perturbed_image[:, 2, :, :] * std[2] + mean[2]
             unnorm_perturbed_image = unnorm_perturbed_image + sign_data_grad
-
-            unnorm_orig_image = orig_image.detach()
+            unnorm_orig_image = orig_image.detach().clone()
             unnorm_orig_image[:, 0, :, :] = unnorm_orig_image[:, 0, :, :] * std[0] + mean[0]
             unnorm_orig_image[:, 1, :, :] = unnorm_orig_image[:, 1, :, :] * std[1] + mean[1]
             unnorm_orig_image[:, 2, :, :] = unnorm_orig_image[:, 2, :, :] * std[2] + mean[2]
             delta = torch.clamp(unnorm_perturbed_image - unnorm_orig_image, min=-epsilon, max=epsilon)
+            unnorm_adv_image = torch.clamp(unnorm_orig_image + delta, clamp_min, clamp_max).detach()
 
-            n_pertured = torch.clamp(unnorm_orig_image + delta, clamp_min, clamp_max).detach()
+            # #----------
+            # cv2.imshow('adv', cv2.cvtColor((unnorm_adv_image.cpu().numpy()[0].transpose(1, 2, 0)* 255).astype(np.uint8),  cv2.COLOR_RGB2BGR))
+            # cv2.imshow('orig', cv2.cvtColor((unnorm_orig_image.cpu().numpy()[0].transpose(1, 2, 0)* 255).astype(np.uint8),  cv2.COLOR_RGB2BGR))
+            #
+            # cv2.waitKey(0)
+            # #------------
+
+            n_pertured = unnorm_adv_image.detach().clone()
             n_pertured[:, 0, :, :] = (n_pertured[:, 0, :, :] - mean[0]) / std[0]
             n_pertured[:, 1, :, :] = (n_pertured[:, 1, :, :] - mean[1]) / std[1]
             n_pertured[:, 2, :, :] = (n_pertured[:, 2, :, :] - mean[2]) / std[2]
-            return n_pertured.detach()
+            del perturbed_image, unnorm_orig_image, unnorm_adv_image
+
+            return n_pertured.detach().clone()
 
         elif clamp_max == 255:
             assert epsilon == 8 and alpha==3, "[0,255] epsilon should be 8, alpha should be 3"
-            sign_data_grad = alpha * data_grad.sign()
-            if targeted:
-                sign_data_grad *= -1
-            if grad_scale is not None:
-                sign_data_grad *= grad_scale
+            # if targeted:
+            #     sign_data_grad *= -1
+            # if grad_scale is not None:
+            #     sign_data_grad *= grad_scale
             # Create the perturbed image by adjusting each pixel of the input image
-            perturbed_image = perturbed_image.detach() + sign_data_grad
+            sign_data_grad = alpha * data_grad.sign()
+            perturbed_image = perturbed_image.detach().clone() + sign_data_grad
             # Adding clipping to maintain [0,1] range
             delta = torch.clamp(perturbed_image - orig_image, min=-epsilon, max=epsilon)
-            perturbed_image = torch.clamp(orig_image + delta, clamp_min, clamp_max).detach()
+            perturbed_image = torch.clamp(orig_image + delta, clamp_min, clamp_max).detach().clone()
+            # #----------
+            # cv2.imshow('input', cv2.cvtColor(perturbed_image.cpu().numpy()[0].transpose(1, 2, 0).astype(np.uint8), cv2.COLOR_RGB2BGR))
+            # cv2.waitKey(0)
+            # #------------
             return perturbed_image
 
     @staticmethod
@@ -81,7 +96,7 @@ class Attack:
     ):
         adversarial_example = images.clone().detach()
         if clamp_max == 1:
-            noise = torch.FloatTensor(images.shape).uniform_(-epsilon, epsilon).to(images.device)
+            noise = torch.FloatTensor(adversarial_example.shape).uniform_(-epsilon, epsilon).to(images.device)
             adversarial_example[:, 0, :, :] = adversarial_example[:, 0, :, :] * std[0] + mean[0]
             adversarial_example[:, 1, :, :] = adversarial_example[:, 1, :, :] * std[1] + mean[1]
             adversarial_example[:, 2, :, :] = adversarial_example[:, 2, :, :] * std[2] + mean[2]
@@ -163,8 +178,7 @@ class Attack:
             transformed_target,
             dim=1
         )
-        if targeted:
-            cossim = 1 - cossim  # if performing targeted attacks, we want to punish for dissimilarity to the target
+
         loss = cossim.detach() * loss
         return loss
 

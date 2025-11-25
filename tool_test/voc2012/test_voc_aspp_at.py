@@ -212,7 +212,7 @@ def net_process(model, image, target, mean, std=None, normalize_layer=None):
     if attack_flag:
         adver_input = attacker(input, target, model, optimizer=None,
                                          attack=args.test_attack, k_number=args.attack_iter, source_layer=args.source_layer,
-                                         classes=args.classes, std=std, mean=mean, result_path=args.save_folder, normalize_layer=normalize_layer, training=False)
+                                         classes=args.classes, std=std, mean=mean, result_path=args.save_folder, args= args, normalize_layer=normalize_layer, training=False)
         # if 'bim' in args.test_attack:
         #     adver_input = BIM(input, target, model, eps=0.03, k_number=args.attack_iter, alpha=0.01,)
         # else:

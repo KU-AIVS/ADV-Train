@@ -1,11 +1,11 @@
 #sh script/adv_train_test.sh
 
 #!/bin/sh
-PYTHON=/home/aivs/anaconda3/envs/adv_training/bin/python
+PYTHON=/home/aivs/anaconda3/envs/adv_t/bin/python
 
 dataset=voc2012
 source_layer=layer4
-attack=cospgd
+attack=segpgd
 at_iter=3
 exp_name=aspp_at
 

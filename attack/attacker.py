@@ -31,7 +31,6 @@ def attacker(input, target, model, optimizer,
              std, mean, eps=0.03, alpha=0.01, result_path=None, args=None, normalize_layer=None, training=True):
     ignore_label = 255
     criterion = torch.nn.CrossEntropyLoss(ignore_index=ignore_label, reduction='none').cuda()
-
     if training:
         clip_min = 0
         clip_max = 1
@@ -44,10 +43,12 @@ def attacker(input, target, model, optimizer,
     model.eval()
 
     if attack =='cw':
-        method = torchattacks.CW(model, steps=k_number, mean=mean, std=std, normalization_applied=training)
+        method = torchattacks.CW(model, steps=k_number, normalization_applied=training)
+        method.set_normalization_used(mean=mean, std=std)
         adversarial_examples = method(input, target)
     elif attack == 'df':
-        method = torchattacks.DeepFool(model, steps=k_number, mean=mean, std=std, normalization_applied=training)
+        method = torchattacks.DeepFool(model, steps=k_number, normalization_applied=training)
+        method.set_normalization_used(mean=mean, std=std)
         adversarial_examples = method(input, target)
     else: # pgd
         adversarial_examples = torch.zeros_like(input)
@@ -60,7 +61,6 @@ def attacker(input, target, model, optimizer,
 
             feature_layer = get_source_layer(model, source_layer)[0]
             h = feature_layer.register_forward_hook(get_mid_output)  # layer select
-
             if training:
                 orig_result_max, _, _, orig_result = model(orig_image, y=target[i:i+1], indicate=1)
             else:
@@ -85,6 +85,7 @@ def attacker(input, target, model, optimizer,
                 clamp_max=clip_max
             )
             adversarial_example = adversarial_example.detach().clone()
+            # adversarial_example = input[i:i+1].detach().clone()
 
             for mm in range(k_number):
                 model.zero_grad()
@@ -94,7 +95,22 @@ def attacker(input, target, model, optimizer,
                     result_max, loss1, loss2, result = model(adversarial_example, y=target[i:i+1], indicate=1)
                 else:
                     result = model(normalize_layer(adversarial_example))
-
+                # #-----
+                # output = result[0].data.cpu().numpy()
+                # output = output.transpose(1, 2, 0)
+                # prediction = np.argmax(output, axis=2)
+                # gray = np.uint8(prediction)
+                #
+                # def colorize(gray, palette):
+                #     # gray: numpy array of the label and 1*3N size list palette
+                #     color = Image.fromarray(gray.astype(np.uint8)).convert('P')
+                #     color.putpalette(palette)
+                #     return color
+                #
+                # colors = np.loadtxt(args.colors_path).astype('uint8')
+                # color = colorize(gray, colors)
+                # color.save(f'{i}_{mm}temp.png')
+                #-----
                 mid_adv = torch.zeros(mid_output.size()).cuda()
                 mid_adv.copy_(mid_output)
 
@@ -123,10 +139,8 @@ def attacker(input, target, model, optimizer,
                         iterations=k_number,
                         targeted=False
                     )
-
                 elif attack == 'pgd':
                     loss = functions.pgd_scale(loss=loss)
-
                 elif attack == 'fspgd':
                     loss = functions.fspgd_scale(
                         mid_original=mid_original,
@@ -134,7 +148,6 @@ def attacker(input, target, model, optimizer,
                         iteration=mm,
                         iterations=k_number,
                     )
-
                 elif attack == 'rppgd':
                     loss, S = functions.rppgd_scale(
                         predictions=result,
@@ -146,7 +159,7 @@ def attacker(input, target, model, optimizer,
                         S=S
                     )
 
-                if args.use_apex and args.multiprocessing_distributed:
+                if args.use_apex and args.multiprocessing_distributed and training:
                     with apex.amp.scale_loss(loss.mean(), optimizer) as scaled_loss:
                         scaled_loss.backward()
                 else:

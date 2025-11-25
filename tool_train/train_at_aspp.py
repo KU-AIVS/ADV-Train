@@ -334,13 +334,16 @@ def train(train_loader, model, criterion, optimizer, epoch, std_origin, mean_ori
 
         target_adver = target.detach().clone()
         # adver_example, output = BIM(input, target, model, criterion, optimizer)
-        adver_example, output = attacker(input, target, model, optimizer,
-                                         args.attack, args.at_iter,  args.source_layer, args.classes, std_origin, mean_origin, args=args, training=True)
-        batch_size = adver_example.shape[0]
-        final_input = torch.cat([input[0:batch_size//2], adver_example[batch_size//2:batch_size]], dim=0)
-        target = torch.cat([target[0:batch_size//2], target_adver[batch_size//2:batch_size]], dim=0)
+        if args.attack == 'clean':
+            _, main_loss, aux_loss, _ = model(input, y=target)
+        else:
+            adver_example, output = attacker(input, target, model, optimizer,
+                                             args.attack, args.at_iter,  args.source_layer, args.classes, std_origin, mean_origin, args=args, training=True)
+            batch_size = adver_example.shape[0]
+            final_input = torch.cat([input[0:batch_size//2], adver_example[batch_size//2:batch_size]], dim=0)
+            target = torch.cat([target[0:batch_size//2], target_adver[batch_size//2:batch_size]], dim=0)
+            _, main_loss, aux_loss, _ = model(final_input, y=target)
 
-        _, main_loss, aux_loss, _ = model(final_input, y=target)
         if not args.multiprocessing_distributed:
             main_loss, aux_loss = torch.mean(main_loss), torch.mean(aux_loss)
         loss = main_loss + args.aux_weight * aux_loss
