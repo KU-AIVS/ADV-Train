@@ -19,7 +19,7 @@ def get_parser():
     parser.add_argument('--at_iter', type=int)
     parser.add_argument('--source_layer')
     parser.add_argument('--avg', type=int, default=5)
-    parser.add_argument('--num_epoch', type=int)
+    parser.add_argument('--num_epoch', type=int, default=None)
     parser.add_argument('--train_num', type=int, default=None)
     parser.add_argument('opts', help='see config/ade20k/ade20k_pspnet50.yaml for all options', default=None, nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -82,24 +82,27 @@ def result_one_train(save_folder):
 
 def result_avg_test(BASE_DIR):
     total_metrics = defaultdict(float)
+    avg_num = 0
     dict_pattern = re.compile(r"(\{'.*\})")
     for idx in range(1, len(os.listdir(BASE_DIR))):
-        log_path = os.path.join(str(args.save_folder).replace("None", str(idx)), 'log.log')
-        with open(log_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                match = dict_pattern.search(line)
-                if match:
-                    dict_string = match.group(1).strip()
-                    result_dict = ast.literal_eval(dict_string)
-        logger.info("Train {} results: {}".format(idx, result_dict))
+        if os.path.isdir(str(args.save_folder).replace("None", str(idx))):
+            log_path = os.path.join(str(args.save_folder).replace("None", str(idx)), 'log.log')
+            with open(log_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    match = dict_pattern.search(line)
+                    if match:
+                        dict_string = match.group(1).strip()
+                        result_dict = ast.literal_eval(dict_string)
+            logger.info("Train {} results: {}".format(idx, result_dict))
 
-        for key, value in result_dict.items():
-            if isinstance(value, (int, float)):
-                total_metrics[key] += value
+            for key, value in result_dict.items():
+                if isinstance(value, (int, float)):
+                    total_metrics[key] += value
+            avg_num += 1
 
     average_metrics = {}
     for key, total_value in total_metrics.items():
-        average_metrics[key] = total_value / len(os.listdir(BASE_DIR))
+        average_metrics[key] = total_value / avg_num
 
     return average_metrics
 
@@ -107,8 +110,9 @@ def result_avg_test(BASE_DIR):
 def main():
     global args, logger
     args = get_parser()
-    args.save_folder = Path(args.save_folder.format(attack=args.attack, at_iter=args.at_iter, train_num=args.train_num,
-                                               num_epoch=args.num_epoch))
+    args.save_folder = Path(
+        args.save_folder.format(attack=args.attack, at_iter=args.at_iter, train_num=args.train_num,
+                                num_epoch=args.num_epoch))
     if args.train_num is not None:
         logger = get_logger()
         logger.info("Train {} loading results....".format(args.train_num))
