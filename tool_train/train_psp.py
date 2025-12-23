@@ -31,11 +31,15 @@ def get_parser():
     parser = argparse.ArgumentParser(description='PyTorch Semantic Segmentation')
     parser.add_argument('--config', type=str, default='config/ade20k/ade20k_pspnet50.yaml', help='config file')
     parser.add_argument('opts', help='see config/ade20k/ade20k_pspnet50.yaml for all options', default=None, nargs=argparse.REMAINDER)
+    parser.add_argument('--train_num', type=int)
+
     args = parser.parse_args()
     assert args.config is not None
     cfg = config.load_cfg_from_cfg_file(args.config)
     if args.opts is not None:
         cfg = config.merge_cfg_from_list(cfg, args.opts)
+    cfg.train_num = args.train_num
+
     return cfg
 
 
@@ -89,6 +93,8 @@ def main():
 def main_worker(gpu, ngpus_per_node, argss):
     global args
     args = argss
+    args.save_path = args.save_path.format(train_num=args.train_num)
+
     if args.sync_bn:
         if args.multiprocessing_distributed:
             BatchNorm = apex.parallel.SyncBatchNorm

@@ -16,7 +16,8 @@ import torch.utils.data
 import torch.multiprocessing as mp
 import torch.distributed as dist
 # from lib.sync_bn.modules import BatchNorm2d
-# import apex
+from torch.nn import SyncBatchNorm as BatchNorm2d
+import apex
 from tensorboardX import SummaryWriter
 
 from model.pspnet import PSPNet, DeepLabV3
@@ -30,12 +31,20 @@ cv2.setNumThreads(0)
 def get_parser():
     parser = argparse.ArgumentParser(description='PyTorch Semantic Segmentation')
     parser.add_argument('--config', type=str, default='config/ade20k/ade20k_pspnet50.yaml', help='config file')
+    parser.add_argument('--attack')
+    parser.add_argument('--at_iter', type=int)
+    parser.add_argument('--train_num', type=int)
+    parser.add_argument('--source_layer')
     parser.add_argument('opts', help='see config/ade20k/ade20k_pspnet50.yaml for all options', default=None, nargs=argparse.REMAINDER)
     args = parser.parse_args()
     assert args.config is not None
     cfg = config.load_cfg_from_cfg_file(args.config)
     if args.opts is not None:
         cfg = config.merge_cfg_from_list(cfg, args.opts)
+    cfg.attack = args.attack
+    cfg.at_iter = args.at_iter
+    cfg.train_num = args.train_num
+    cfg.source_layer = args.source_layer
     return cfg
 
 
@@ -90,11 +99,15 @@ def main():
 def main_worker(gpu, ngpus_per_node, argss):
     global args
     args = argss
-    args.save_path = args.save_path.format(attack=args.attack, at_iter=args.at_iter)
-    args.model_path = args.model_path.format(attack=args.attack, at_iter=args.at_iter)
-    args.save_folder = args.save_folder.format(attack=args.attack, at_iter=args.at_iter)
+    args.save_path = args.save_path.format(attack=args.attack, at_iter=args.at_iter, train_num=args.train_num)
 
-    BatchNorm = nn.BatchNorm2d
+    if args.sync_bn:
+        if args.multiprocessing_distributed:
+            BatchNorm = apex.parallel.SyncBatchNorm
+        else:
+            BatchNorm = BatchNorm2d
+    else:
+        BatchNorm = nn.BatchNorm2d
     if args.distributed:
         if args.dist_url == "env://" and args.rank == -1:
             args.rank = int(os.environ["RANK"])
@@ -128,6 +141,14 @@ def main_worker(gpu, ngpus_per_node, argss):
         args.batch_size = int(args.batch_size / ngpus_per_node)
         args.batch_size_val = int(args.batch_size_val / ngpus_per_node)
         args.workers = int(args.workers / ngpus_per_node)
+        if args.use_apex:
+            model, optimizer = apex.amp.initialize(model.cuda(), optimizer, opt_level=args.opt_level,
+                                                   keep_batchnorm_fp32=args.keep_batchnorm_fp32,
+                                                   loss_scale=args.loss_scale)
+            model = apex.parallel.DistributedDataParallel(model)
+        else:
+            model = torch.nn.parallel.DistributedDataParallel(model.cuda(), device_ids=[gpu])
+
     else:
         model = torch.nn.DataParallel(model.cuda())
 
@@ -165,8 +186,6 @@ def main_worker(gpu, ngpus_per_node, argss):
     std = [0.229, 0.224, 0.225]
     std = [item * value_scale for item in std]
 
-    global mean_origin
-    global std_origin
     mean_origin = [0.485, 0.456, 0.406]
     std_origin = [0.229, 0.224, 0.225]
 
@@ -201,7 +220,7 @@ def main_worker(gpu, ngpus_per_node, argss):
         epoch_log = epoch + 1
         if args.distributed:
             train_sampler.set_epoch(epoch)
-        loss_train, mIoU_train, mAcc_train, allAcc_train = train(train_loader, model, criterion, optimizer, epoch)
+        loss_train, mIoU_train, mAcc_train, allAcc_train = train(train_loader, model, criterion, optimizer, epoch, std_origin, mean_origin)
         if main_process():
             writer.add_scalar('loss_train', loss_train, epoch_log)
             writer.add_scalar('mIoU_train', mIoU_train, epoch_log)
@@ -225,16 +244,18 @@ def main_worker(gpu, ngpus_per_node, argss):
                 writer.add_scalar('mAcc_val', mAcc_val, epoch_log)
                 writer.add_scalar('allAcc_val', allAcc_val, epoch_log)
 
-
-def FGSM(input, target, model, criterion, optimizer, clip_min, clip_max, eps=0.06):
+def FGSM(input, target, model, criterion, optimizer, clip_min, clip_max, eps=0.06, mean_origin=[0.485, 0.456, 0.406], std_origin=[0.229, 0.224, 0.225]):
     input_variable = input.clone().detach()
     input_variable.requires_grad = True
     result_max, loss1, loss2, result = model(input_variable, y=target, indicate=1)
     loss_our = criterion(result, target)
     loss_our = loss_our + loss1 * 0 + loss2 * 0
     optimizer.zero_grad()
-
-    loss_our.backward()
+    if args.use_apex and args.multiprocessing_distributed:
+        with apex.amp.scale_loss(loss_our, optimizer) as scaled_loss:
+            scaled_loss.backward()
+    else:
+        loss_our.backward()
     res = input_variable.grad
 
     ################################################################################
@@ -254,7 +275,7 @@ def FGSM(input, target, model, criterion, optimizer, clip_min, clip_max, eps=0.0
     return adversarial_example
 
 
-def BIM(input, target, model, criterion, optimizer, eps=0.03, k_number=3):
+def BIM(input, target, model, criterion, optimizer, eps=0.03, k_number=3, mean_origin = [0.485, 0.456, 0.406], std_origin = [0.229, 0.224, 0.225]):
     model.eval()
     input_unnorm = input.clone().detach()
     input_unnorm[:, 0, :, :] = input_unnorm[:, 0, :, :] * std_origin[0] + mean_origin[0]
@@ -279,7 +300,7 @@ def BIM(input, target, model, criterion, optimizer, eps=0.03, k_number=3):
     return adversarial_example, result_max_final
 
 
-def train(train_loader, model, criterion, optimizer, epoch):
+def train(train_loader, model, criterion, optimizer, epoch, std_origin, mean_origin):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     main_loss_meter = AverageMeter()
@@ -307,21 +328,23 @@ def train(train_loader, model, criterion, optimizer, epoch):
 
         target_adver = target.detach().clone()
         # adver_example, output = BIM(input, target, model, criterion, optimizer)
-        adver_example, output = attacker(input, target, model, criterion, optimizer,
-                                         args.attack, args.source_layer, args.classes, std_origin, mean_origin, k_number=args.at_iter)
-
+        adver_example, output = attacker(input, target, model, optimizer,
+                                         args.attack, args.at_iter, args.source_layer, args.classes, std_origin,
+                                         mean_origin, args=args, training=True)
         batch_size = adver_example.shape[0]
         final_input = torch.cat([input[0:batch_size//2], adver_example[batch_size//2:batch_size]], dim=0)
         target = torch.cat([target[0:batch_size//2], target_adver[batch_size//2:batch_size]], dim=0)
-
         _, main_loss, aux_loss, _ = model(final_input, y=target)
         if not args.multiprocessing_distributed:
             main_loss, aux_loss = torch.mean(main_loss), torch.mean(aux_loss)
         loss = main_loss + args.aux_weight * aux_loss
 
         optimizer.zero_grad()
-
-        loss.backward()
+        if args.use_apex and args.multiprocessing_distributed:
+            with apex.amp.scale_loss(loss, optimizer) as scaled_loss:
+                scaled_loss.backward()
+        else:
+            loss.backward()
         optimizer.step()
 
         n = input.size(0)

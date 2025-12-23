@@ -335,7 +335,7 @@ def train(train_loader, model, criterion, optimizer, epoch, std_origin, mean_ori
         target_adver = target.detach().clone()
         # adver_example, output = BIM(input, target, model, criterion, optimizer)
         if args.attack == 'clean':
-            _, main_loss, aux_loss, _ = model(input, y=target)
+            output, main_loss, aux_loss, _ = model(input, y=target)
         else:
             adver_example, output = attacker(input, target, model, optimizer,
                                              args.attack, args.at_iter,  args.source_layer, args.classes, std_origin, mean_origin, args=args, training=True)

@@ -1,5 +1,5 @@
 DATA:
-  data_root: /media/wideup/Backup/es/yg_8/datasets/voc2012
+  data_root: /home/aivs/바탕화면/ES/Robust_train_250707/datasets/voc/VOC2012
   train_list: dataset/voc2012/list/train_aug.txt
   val_list: dataset/voc2012/list/val.txt
   classes: 21
@@ -28,7 +28,7 @@ TRAIN:
   weight_decay: 0.0001
   manual_seed: 
   print_freq: 10
-  save_freq: 1
+  save_freq: 10
   save_path: exp/voc2012/aspp_at_{attack}{at_iter}/{train_num}/model
   weight:  # path to initial weight (default: none)
   resume: 

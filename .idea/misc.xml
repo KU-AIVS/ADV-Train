@@ -3,5 +3,5 @@
   <component name="Black">
     <option name="sdkName" value="adv_train" />
   </component>
-  <component name="ProjectRootManager" version="2" project-jdk-name="adv_t" project-jdk-type="Python SDK" />
+  <component name="ProjectRootManager" version="2" project-jdk-name="adv_training" project-jdk-type="Python SDK" />
 </project>

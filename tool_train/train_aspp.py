@@ -15,8 +15,8 @@ import torch.optim
 import torch.utils.data
 import torch.multiprocessing as mp
 import torch.distributed as dist
-# from lib.sync_bn.modules import BatchNorm2d
-# import apex
+from torch.nn import SyncBatchNorm as BatchNorm2d
+import apex
 from tensorboardX import SummaryWriter
 
 from model.pspnet import PSPNet, DeepLabV3
@@ -31,11 +31,15 @@ def get_parser():
     parser = argparse.ArgumentParser(description='PyTorch Semantic Segmentation')
     parser.add_argument('--config', type=str, default='config/ade20k/ade20k_pspnet50.yaml', help='config file')
     parser.add_argument('opts', help='see config/ade20k/ade20k_pspnet50.yaml for all options', default=None, nargs=argparse.REMAINDER)
+    parser.add_argument('--train_num', type=int)
+
     args = parser.parse_args()
     assert args.config is not None
     cfg = config.load_cfg_from_cfg_file(args.config)
     if args.opts is not None:
         cfg = config.merge_cfg_from_list(cfg, args.opts)
+    cfg.train_num = args.train_num
+
     return cfg
 
 
@@ -89,13 +93,15 @@ def main():
 def main_worker(gpu, ngpus_per_node, argss):
     global args
     args = argss
-    # if args.sync_bn:
-    #     if args.multiprocessing_distributed:
-    #         BatchNorm = apex.parallel.SyncBatchNorm
-    #     else:
-    #         BatchNorm = BatchNorm2d
-    # else:
-    BatchNorm = nn.BatchNorm2d
+    args.save_path = args.save_path.format(train_num=args.train_num)
+
+    if args.sync_bn:
+        if args.multiprocessing_distributed:
+            BatchNorm = apex.parallel.SyncBatchNorm
+        else:
+            BatchNorm = BatchNorm2d
+    else:
+        BatchNorm = nn.BatchNorm2d
     if args.distributed:
         if args.dist_url == "env://" and args.rank == -1:
             args.rank = int(os.environ["RANK"])
@@ -123,19 +129,20 @@ def main_worker(gpu, ngpus_per_node, argss):
         logger.info("=> creating model ...")
         logger.info("Classes: {}".format(args.classes))
         logger.info(model)
-    # if args.distributed:
-    #     torch.cuda.set_device(gpu)
-    #     args.batch_size = int(args.batch_size / ngpus_per_node)
-    #     args.batch_size_val = int(args.batch_size_val / ngpus_per_node)
-    #     args.workers = int(args.workers / ngpus_per_node)
-    #     if args.use_apex:
-    #         model, optimizer = apex.amp.initialize(model.cuda(), optimizer, opt_level=args.opt_level, keep_batchnorm_fp32=args.keep_batchnorm_fp32, loss_scale=args.loss_scale)
-    #         model = apex.parallel.DistributedDataParallel(model)
-    #     else:
-    #         model = torch.nn.parallel.DistributedDataParallel(model.cuda(), device_ids=[gpu])
 
-    # else:
-    model = torch.nn.DataParallel(model.cuda())
+    if args.distributed:
+        torch.cuda.set_device(gpu)
+        args.batch_size = int(args.batch_size / ngpus_per_node)
+        args.batch_size_val = int(args.batch_size_val / ngpus_per_node)
+        args.workers = int(args.workers / ngpus_per_node)
+        if args.use_apex:
+            model, optimizer = apex.amp.initialize(model.cuda(), optimizer, opt_level=args.opt_level, keep_batchnorm_fp32=args.keep_batchnorm_fp32, loss_scale=args.loss_scale)
+            model = apex.parallel.DistributedDataParallel(model)
+        else:
+            model = torch.nn.parallel.DistributedDataParallel(model.cuda(), device_ids=[gpu])
+
+    else:
+        model = torch.nn.DataParallel(model.cuda())
 
     if args.weight:
         if os.path.isfile(args.weight):
@@ -257,11 +264,11 @@ def train(train_loader, model, optimizer, epoch):
         loss = main_loss + args.aux_weight * aux_loss
 
         optimizer.zero_grad()
-        # if args.use_apex and args.multiprocessing_distributed:
-        #     with apex.amp.scale_loss(loss, optimizer) as scaled_loss:
-        #         scaled_loss.backward()
-        # else:
-        loss.backward()
+        if args.use_apex and args.multiprocessing_distributed:
+            with apex.amp.scale_loss(loss, optimizer) as scaled_loss:
+                scaled_loss.backward()
+        else:
+            loss.backward()
         optimizer.step()
 
         n = input.size(0)

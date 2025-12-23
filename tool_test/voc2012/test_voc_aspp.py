@@ -15,6 +15,8 @@ import torch.nn as nn
 from model.pspnet import PSPNet, DeepLabV3
 from util import dataset, transform, config
 from util.util import AverageMeter, intersectionAndUnion, check_makedirs, colorize
+from attack.attacker import attacker
+import torchvision
 
 cv2.ocl.setUseOpenCL(False)
 
@@ -22,18 +24,29 @@ cv2.ocl.setUseOpenCL(False)
 def get_parser():
     parser = argparse.ArgumentParser(description='PyTorch Semantic Segmentation')
     parser.add_argument('--config', type=str, default='config/ade20k/ade20k_pspnet50.yaml', help='config file')
-    parser.add_argument('--attack', action='store_true', help='evaluate the model with attack or not')
+    parser.add_argument('--test_attack', type=str)
+    parser.add_argument('--attack_iter', type=int)
+    parser.add_argument('--num_epoch', type=int)
+    parser.add_argument('--train_num', type=int)
+
+    parser.add_argument('--source_layer', default=None)
     parser.add_argument('opts', help='see config/ade20k/ade20k_pspnet50.yaml for all options', default=None, nargs=argparse.REMAINDER)
     args = parser.parse_args()
     assert args.config is not None
 
     global attack_flag
-    if args.attack:
+    if args.test_attack:
         attack_flag = True
     else:
         attack_flag = False
 
     cfg = config.load_cfg_from_cfg_file(args.config)
+    cfg.test_attack = args.test_attack
+    cfg.attack_iter = args.attack_iter
+    cfg.train_num = args.train_num
+    cfg.source_layer = args.source_layer
+    cfg.num_epoch = args.num_epoch
+
     if args.opts is not None:
         cfg = config.merge_cfg_from_list(cfg, args.opts)
     return cfg
@@ -45,8 +58,13 @@ def get_logger():
     logger.setLevel(logging.INFO)
     handler = logging.StreamHandler()
     fmt = "[%(asctime)s %(levelname)s %(filename)s line %(lineno)d %(process)d] %(message)s"
-    handler.setFormatter(logging.Formatter(fmt))
+    formatter = logging.Formatter(fmt)
+    handler.setFormatter(formatter)
     logger.addHandler(handler)
+    file_handler = logging.FileHandler(f'{args.save_folder}/log.log', mode='a')# 파일명 지정
+    file_handler.setFormatter(formatter)  # 동일한 포맷 적용
+    logger.addHandler(file_handler)  # 로거에 핸들러 추가
+
     return logger
 
 
@@ -107,6 +125,17 @@ def BIM(input, target, model, eps=0.03, k_number=2, alpha=0.01):
 def main():
     global args, logger
     args = get_parser()
+    args.save_path = args.save_path.format(train_num=args.train_num)
+    args.model_path = args.model_path.format( train_num=args.train_num, num_epoch=args.num_epoch)
+    if attack_flag:
+        args.save_folder = os.path.join(
+            args.save_folder.format(train_num=args.train_num, num_epoch=args.num_epoch), f'{args.test_attack}{args.attack_iter}')
+    else:
+        args.save_folder = os.path.join(
+            args.save_folder.format(train_num=args.train_num, num_epoch=args.num_epoch), 'clean')
+
+    if not os.path.exists(args.save_folder):
+        os.makedirs(args.save_folder, exist_ok=True)
     logger = get_logger()
     # os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(str(x) for x in args.test_gpu)
     logger.info(args)
@@ -122,11 +151,6 @@ def main():
     mean = [item * value_scale for item in mean]
     std = [0.229, 0.224, 0.225]
     std = [item * value_scale for item in std]
-
-    global mean_origin
-    global std_origin
-    mean_origin = [0.485, 0.456, 0.406]
-    std_origin = [0.229, 0.224, 0.225]
 
     gray_folder = os.path.join(args.save_folder, 'gray')
     color_folder = os.path.join(args.save_folder, 'color')
@@ -155,21 +179,18 @@ def main():
             logger.info("=> loaded checkpoint '{}'".format(args.model_path))
         else:
             raise RuntimeError("=> no checkpoint found at '{}'".format(args.model_path))
-        test(test_loader, test_data.data_list, model, args.classes, mean, std, args.base_size, args.test_h, args.test_w, args.scales, gray_folder, color_folder, colors)
+
+        normalize_layer =  torchvision.transforms.Normalize(mean=mean, std=std)
+
+        test(test_loader, test_data.data_list, model, args.classes, mean, std, args.base_size, args.test_h, args.test_w, args.scales, gray_folder, color_folder, colors, normalize_layer)
     if args.split != 'test':
         cal_acc(test_data.data_list, gray_folder, args.classes, names)
 
 
-def net_process(model, image, target, mean, std=None):
+def net_process(model, image, target, mean, std=None, normalize_layer=None):
     input = torch.from_numpy(image.transpose((2, 0, 1))).float()
     target = torch.from_numpy(target).long()
 
-    if std is None:
-        for t, m in zip(input, mean):
-            t.sub_(m)
-    else:
-        for t, m, s in zip(input, mean, std):
-            t.sub_(m).div_(s)
     input = input.unsqueeze(0).cuda()
     target = target.unsqueeze(0).cuda()
 
@@ -183,7 +204,10 @@ def net_process(model, image, target, mean, std=None):
         target = torch.cat([target, target.flip(2)], 0)
 
     if attack_flag:
-        adver_input = BIM(input, target, model, eps=0.03, k_number=2, alpha=0.01)
+        adver_input = attacker(input, target, model, optimizer=None,
+                               attack=args.test_attack, k_number=args.attack_iter, source_layer=args.source_layer,
+                               classes=args.classes, std=std, mean=mean, result_path=args.save_folder, args=args,
+                               normalize_layer=normalize_layer, training=False)
         with torch.no_grad():
             output = model(adver_input)
     else:
@@ -204,7 +228,7 @@ def net_process(model, image, target, mean, std=None):
     return output
 
 
-def scale_process(model, image, target, classes, crop_h, crop_w, h, w, mean, std=None, stride_rate=2/3):
+def scale_process(model, image, target, classes, crop_h, crop_w, h, w, mean, std=None, stride_rate=2/3, normalize_layer=None):
     ori_h, ori_w, _ = image.shape
     pad_h = max(crop_h - ori_h, 0)
     pad_w = max(crop_w - ori_w, 0)
@@ -240,7 +264,7 @@ def scale_process(model, image, target, classes, crop_h, crop_w, h, w, mean, std
     return prediction
 
 
-def test(test_loader, data_list, model, classes, mean, std, base_size, crop_h, crop_w, scales, gray_folder, color_folder, colors):
+def test(test_loader, data_list, model, classes, mean, std, base_size, crop_h, crop_w, scales, gray_folder, color_folder, colors, normalize_layer):
     logger.info('>>>>>>>>>>>>>>>> Start Evaluation >>>>>>>>>>>>>>>>')
     data_time = AverageMeter()
     batch_time = AverageMeter()
@@ -270,7 +294,7 @@ def test(test_loader, data_list, model, classes, mean, std, base_size, crop_h, c
             image_scale = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
             target_scale = cv2.resize(target.astype(np.uint8), (new_w, new_h), interpolation=cv2.INTER_NEAREST)
 
-            prediction += scale_process(model, image_scale, target_scale, classes, crop_h, crop_w, h, w, mean, std)
+            prediction += scale_process(model, image_scale, target_scale, classes, crop_h, crop_w, h, w, mean, std, normalize_layer=normalize_layer)
         prediction /= len(scales)
         prediction = np.argmax(prediction, axis=2)
         batch_time.update(time.time() - end)

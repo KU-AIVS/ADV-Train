@@ -55,25 +55,26 @@ def attacker(input, target, model, optimizer,
         for i in range(input.shape[0]):
             orig_image  = input[i:i+1].detach().clone()
 
-            def get_mid_output(m, i, o):
-                global mid_output
-                mid_output = o
-
-            feature_layer = get_source_layer(model, source_layer)[0]
-            h = feature_layer.register_forward_hook(get_mid_output)  # layer select
+            if source_layer is not None:
+                def get_mid_output(m, i, o):
+                    global mid_output
+                    mid_output = o
+                feature_layer = get_source_layer(model, source_layer)[0]
+                h = feature_layer.register_forward_hook(get_mid_output)  # layer select
             if training:
                 orig_result_max, _, _, orig_result = model(orig_image, y=target[i:i+1], indicate=1)
             else:
                 orig_result = model(normalize_layer(orig_image))
+            orig_result = orig_result.detach()
             orig_loss = criterion(orig_result, target[i:i+1])
 
             if 'rp' in attack:
                 orig_result_max = torch.argmax(orig_result, dim=1)
                 S = (orig_result_max != target[i:i+1]).long() * 2
 
-            mid_original = torch.zeros(mid_output.size()).cuda()
-            mid_original.copy_(mid_output)
-
+            if source_layer is not None:
+                mid_original = torch.zeros(mid_output.size()).cuda()
+                mid_original.copy_(mid_output.detach())
             functions = Attack()
 
             adversarial_example = functions.init_linf(
@@ -111,8 +112,9 @@ def attacker(input, target, model, optimizer,
                 # color = colorize(gray, colors)
                 # color.save(f'{i}_{mm}temp.png')
                 #-----
-                mid_adv = torch.zeros(mid_output.size()).cuda()
-                mid_adv.copy_(mid_output)
+                if source_layer is not None:
+                    mid_adv = torch.zeros(mid_output.size()).cuda()
+                    mid_adv.copy_(mid_output)
 
                 if training:
                     loss_our = criterion(result.float(), target[i:i + 1].detach())
@@ -158,6 +160,14 @@ def attacker(input, target, model, optimizer,
                         iterations=k_number,
                         S=S
                     )
+                elif attack == 'fs_yg':
+                    loss = functions.yg_loss(
+                        feat_clean=mid_original,
+                        feat_adv=mid_adv,
+                        logits_clean=orig_result,
+                        logits_adv=result,
+                        labels=target[i:i+1].long(),
+                    )
 
                 if args.use_apex and args.multiprocessing_distributed and training:
                     with apex.amp.scale_loss(loss.mean(), optimizer) as scaled_loss:
@@ -180,8 +190,12 @@ def attacker(input, target, model, optimizer,
                 adversarial_example = adversarial_example.detach()
 
             adversarial_examples[i:i+1] = adversarial_example.detach()
-            del mid_original, mid_adv,loss
-            h.remove()
+            if source_layer is not None:
+                del mid_original, mid_adv
+            del loss
+
+            if source_layer is not None:
+                h.remove()
 
             # ------Check adversarial examples
             # if not training:

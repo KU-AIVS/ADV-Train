@@ -31,7 +31,7 @@ def get_parser():
     parser.add_argument('--num_epoch', type=int)
     parser.add_argument('--train_num', type=int)
 
-    parser.add_argument('--source_layer')
+    parser.add_argument('--source_layer', default=None)
     parser.add_argument('opts', help='see config/ade20k/ade20k_pspnet50.yaml for all options', default=None, nargs=argparse.REMAINDER)
     args = parser.parse_args()
     assert args.config is not None

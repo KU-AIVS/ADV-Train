@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import math
 import torch.nn.functional as F
+from attack import yg1, yg2, yg3, yg4
 
 
 class Attack:
@@ -283,6 +284,14 @@ class Attack:
         loss_RP = b * loss_R + (1 - b) * loss_P
 
         return loss_RP, S
+
+    @staticmethod
+    def yg_loss(feat_clean, feat_adv, logits_clean, logits_adv, labels):
+        # loss = yg3.loss_fpd_margin(feat_clean, feat_adv, logits_clean, logits_adv, labels)
+        loss = yg4.loss_fpd_margin_fg_ctx_harmonic(feat_clean, feat_adv, logits_clean, logits_adv, labels)
+
+        return loss
+
 
     @staticmethod
     def pgd_scale(
