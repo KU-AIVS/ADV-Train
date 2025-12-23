@@ -25,16 +25,15 @@ cv2.ocl.setUseOpenCL(False)
 
 def get_parser():
     parser = argparse.ArgumentParser(description='PyTorch Semantic Segmentation')
-    parser.add_argument('--config', type=str, default='config/ade20k/ade20k_pspnet50.yaml', help='config file')
     parser.add_argument('--test_attack', type=str)
-    parser.add_argument('opts', help='see config/ade20k/ade20k_pspnet50.yaml for all options', default=None,
-                        nargs=argparse.REMAINDER)
-    # parser.add_argument('--attack', action='store_true', help='evaluate the model with attack or not')
-    # parser.add_argument('--attack_name', type=str, default='BIM', help='name of the attack, default BIM, options: cospgd, segpgd, pgd')
-    # parser.add_argument('--attack_iterations', type=int, default=4, help='iterations for the attack')
-    # parser.add_argument('--attack_epsilon', type=float, default=0.03, help='epsilon for the attack')
-    # parser.add_argument('--attack_alpha', type=float, default=0.01, help='alpha for the attack')
-    # parser.add_argument('--gpu_id', type=str, default='0', help='GPU id to be used')
+    parser.add_argument('--attack')
+    parser.add_argument('--at_iter', type=int)
+    parser.add_argument('--attack_iter', type=int)
+    parser.add_argument('--num_epoch', type=int)
+    parser.add_argument('--train_num', type=int)
+
+    parser.add_argument('--source_layer', default=None)
+    parser.add_argument('opts', help='see config/ade20k/ade20k_pspnet50.yaml for all options', default=None, nargs=argparse.REMAINDER)
     args = parser.parse_args()
     assert args.config is not None
 
@@ -43,9 +42,15 @@ def get_parser():
         attack_flag = True
     else:
         attack_flag = False
+
     cfg = config.load_cfg_from_cfg_file(args.config)
-    args_ = parser.parse_args()
-    cfg.test_attack = args_.test_attack
+    cfg.test_attack = args.test_attack
+    cfg.attack = args.attack
+    cfg.at_iter = args.at_iter
+    cfg.attack_iter = args.attack_iter
+    cfg.train_num = args.train_num
+    cfg.source_layer = args.source_layer
+    cfg.num_epoch = args.num_epoch
 
     if args.opts is not None:
         cfg = config.merge_cfg_from_list(cfg, args.opts)
@@ -58,8 +63,13 @@ def get_logger():
     logger.setLevel(logging.INFO)
     handler = logging.StreamHandler()
     fmt = "[%(asctime)s %(levelname)s %(filename)s line %(lineno)d %(process)d] %(message)s"
-    handler.setFormatter(logging.Formatter(fmt))
+    formatter = logging.Formatter(fmt)
+    handler.setFormatter(formatter)
     logger.addHandler(handler)
+    file_handler = logging.FileHandler(f'{args.save_folder}/log.log', mode='a')# 파일명 지정
+    file_handler.setFormatter(formatter)  # 동일한 포맷 적용
+    logger.addHandler(file_handler)  # 로거에 핸들러 추가
+
     return logger
 
 
@@ -97,6 +107,7 @@ def FGSM(input, target, model, clip_min, clip_max, eps=0.2):
     return adversarial_example
 
 
+
 def BIM(input, target, model, eps=0.03, k_number=20, alpha=0.01):
     input_unnorm = input.clone().detach()
     input_unnorm[:, 0, :, :] = input_unnorm[:, 0, :, :] * std_origin[0] + mean_origin[0]
@@ -116,13 +127,19 @@ def BIM(input, target, model, eps=0.03, k_number=20, alpha=0.01):
 
 
 
+
 def main():
     global args, logger, attack_flag, attack_name, attack_iterations, attack_epsilon, attack_alpha, gpu_id
     args = get_parser()
-    args.save_path = args.save_path.format(attack=args.attack, at_iter=args.at_iter)
-    args.model_path = args.model_path.format(attack=args.attack, at_iter=args.at_iter)
-    args.save_folder = os.path.join(args.save_folder.format(attack=args.attack, at_iter=args.at_iter), args.test_attack)
+    args.save_path = args.save_path.format(attack=args.attack, at_iter=args.at_iter, train_num=args.train_num)
+    args.model_path = args.model_path.format(attack=args.attack, at_iter=args.at_iter, train_num=args.train_num,  num_epoch=args.num_epoch)
+    if attack_flag:
+        args.save_folder = os.path.join(args.save_folder.format(attack=args.attack, at_iter=args.at_iter, train_num=args.train_num,  num_epoch=args.num_epoch), f'{args.test_attack}{args.attack_iter}')
+    else:
+        args.save_folder = os.path.join(args.save_folder.format(attack=args.attack, at_iter=args.at_iter, train_num=args.train_num, num_epoch=args.num_epoch), 'clean')
 
+    if not os.path.exists(args.save_folder):
+        os.makedirs(args.save_folder, exist_ok=True)
     logger = get_logger()
     os.environ["CUDA_VISIBLE_DEVICES"] = '{}'.format(gpu_id)
     logger.info(args)
@@ -138,11 +155,6 @@ def main():
     mean = [item * value_scale for item in mean]
     std = [0.229, 0.224, 0.225]
     std = [item * value_scale for item in std]
-
-    global mean_origin
-    global std_origin
-    mean_origin = [0.485, 0.456, 0.406]
-    std_origin = [0.229, 0.224, 0.225]
 
     gray_folder = os.path.join(args.save_folder, 'gray')
     color_folder = os.path.join(args.save_folder, 'color')
@@ -176,7 +188,7 @@ def main():
         normalize_layer =  torchvision.transforms.Normalize(mean=mean, std=std)
         
         
-        test(test_loader, test_data.data_list, model, args.classes, mean, std, args.base_size, args.test_h, args.test_w, args.scales, gray_folder, color_folder, colors, normalize_layer=normalize_layer)
+        test(test_loader, test_data.data_list, model, args.classes, mean, std, args.base_size, args.test_h, args.test_w, args.scales, gray_folder, color_folder, colors, normalize_layer)
     if args.split != 'test':
         cal_acc(test_data.data_list, gray_folder, args.classes, names)
 
@@ -184,13 +196,6 @@ def main():
 def net_process(model, image, target, mean, std=None, normalize_layer=None):
     input = torch.from_numpy(image.transpose((2, 0, 1))).float() # PLEASE NOTE: IMAGES HERE ARE BETWEEN [0, 255]
     target = torch.from_numpy(target).long()
-
-    if std is None:
-        for t, m in zip(input, mean):
-            t.sub_(m)
-    else:
-        for t, m, s in zip(input, mean, std):
-            t.sub_(m).div_(s)
 
     input = input.unsqueeze(0).cuda()
     target = target.unsqueeze(0).cuda()
@@ -205,23 +210,11 @@ def net_process(model, image, target, mean, std=None, normalize_layer=None):
         target = torch.cat([target, target.flip(2)], 0)
 
     if attack_flag:
-        if 'bim' in args.test_attack:
-            import re
-            def split_text_number(s):
-                match = re.match(r"([a-zA-Z]+)(\d+)", s)
-                if match:
-                    text_part = match.group(1)
-                    number_part = match.group(2)
-                    return text_part, int(number_part)  # 숫자는 정수형으로 변환
-                return s
-            attack, k_number = split_text_number(args.test_attack)
-            adver_input = BIM(input, target, model, eps=0.03, k_number=k_number, alpha=0.01)
-        else:
-            adver_input = attacker(input, target, model, criterion=None, optimizer=None,
-                                         attack=args.test_attack, source_layer=args.source_layer,
-                                         classes=args.classes, std_origin=std_origin, mean_origin=mean_origin)
+        adver_input = attacker(input, target, model, optimizer=None,
+                                         attack=args.test_attack, k_number=args.attack_iter, source_layer=args.source_layer,
+                                         classes=args.classes, std=std, mean=mean, result_path=args.save_folder, args= args, normalize_layer=normalize_layer, training=False)
         with torch.no_grad():
-            output = model(adver_input)
+            output = model(normalize_layer(adver_input)) #NORMALIZE THE INPUT BEFORE PASSING IT TO THE MODEL
     else:
         with torch.no_grad():
             output = model(normalize_layer(input)) #NORMALIZE THE INPUT BEFORE PASSING IT TO THE MODEL

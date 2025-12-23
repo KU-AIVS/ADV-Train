@@ -4,7 +4,7 @@
 PYTHON=/home/aivs/anaconda3/envs/adv_t/bin/python
 
 dataset=voc2012
-source_layer=layer4
+source_layer=layer3_2
 attack=pgd
 at_iter=3
 exp_name=aspp_at
@@ -30,19 +30,19 @@ export PYTHONPATH=./
 # ------------------------TEST------------------------
 num_epoch=50
 cp tool_test/voc2012/test_voc_aspp_at.py ${exp_dir}
-#Clean
-$PYTHON -u tool_test/voc2012/test_voc_aspp_at.py \
-  --config=${config} --attack=${attack} --at_iter=${at_iter} --source_layer=${source_layer} --num_epoch=${num_epoch} --train_num=${num}\
-  2>&1 | tee ${result_dir}/test-Clean.log
-
-#PGD3
-$PYTHON -u tool_test/voc2012/test_voc_aspp_at.py \
-  --config=${config} --attack=${attack} --at_iter=${at_iter} --test_attack pgd --attack_iter=3 --num_epoch=${num_epoch} --train_num=${num}\
-  2>&1 | tee -a ${result_dir}/test-${num}.log
-#PGD5
-$PYTHON -u tool_test/voc2012/test_voc_aspp_at.py \
-  --config=${config}  --attack=${attack} --at_iter=${at_iter} --test_attack pgd --attack_iter=5 --num_epoch=${num_epoch} --train_num=${num}\
-  2>&1 | tee -a ${result_dir}/test-${num}.log
+##Clean
+#$PYTHON -u tool_test/voc2012/test_voc_aspp_at.py \
+#  --config=${config} --attack=${attack} --at_iter=${at_iter} --source_layer=${source_layer} --num_epoch=${num_epoch} --train_num=${num}\
+#  2>&1 | tee ${result_dir}/test-Clean.log
+#
+##PGD3
+#$PYTHON -u tool_test/voc2012/test_voc_aspp_at.py \
+#  --config=${config} --attack=${attack} --at_iter=${at_iter} --test_attack pgd --attack_iter=3 --num_epoch=${num_epoch} --train_num=${num}\
+#  2>&1 | tee -a ${result_dir}/test-${num}.log
+##PGD5
+#$PYTHON -u tool_test/voc2012/test_voc_aspp_at.py \
+#  --config=${config}  --attack=${attack} --at_iter=${at_iter} --test_attack pgd --attack_iter=5 --num_epoch=${num_epoch} --train_num=${num}\
+#  2>&1 | tee -a ${result_dir}/test-${num}.log
 #PGD7
 $PYTHON -u tool_test/voc2012/test_voc_aspp_at.py \
   --config=${config}  --attack=${attack} --at_iter=${at_iter} --test_attack pgd --attack_iter=7 --num_epoch=${num_epoch} --train_num=${num}\

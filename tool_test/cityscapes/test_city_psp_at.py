@@ -23,6 +23,8 @@ def get_parser():
     parser = argparse.ArgumentParser(description='PyTorch Semantic Segmentation')
     parser.add_argument('--config', type=str, default='config/ade20k/ade20k_pspnet50.yaml', help='config file')
     parser.add_argument('--test_attack', type=str)
+    parser.add_argument('--attack')
+    parser.add_argument('--at_iter', type=int)
     parser.add_argument('--attack_iter', type=int)
     parser.add_argument('--num_epoch', type=int)
     parser.add_argument('--train_num', type=int)
@@ -37,12 +39,16 @@ def get_parser():
         attack_flag = True
     else:
         attack_flag = False
+
     cfg = config.load_cfg_from_cfg_file(args.config)
     cfg.test_attack = args.test_attack
+    cfg.attack = args.attack
+    cfg.at_iter = args.at_iter
     cfg.attack_iter = args.attack_iter
     cfg.train_num = args.train_num
     cfg.source_layer = args.source_layer
     cfg.num_epoch = args.num_epoch
+
     if args.opts is not None:
         cfg = config.merge_cfg_from_list(cfg, args.opts)
     return cfg
@@ -62,8 +68,6 @@ def get_logger():
     logger.addHandler(file_handler)  # 로거에 핸들러 추가
 
     return logger
-
-
 
 
 def FGSM(input, target, model, clip_min, clip_max, eps=0.2):
@@ -101,7 +105,7 @@ def FGSM(input, target, model, clip_min, clip_max, eps=0.2):
 
 
 
-def BIM(input, target, model, eps=0.03, k_number=2, alpha=0.01):
+def BIM(input, target, model, eps=0.03, k_number=20, alpha=0.01):
     input_unnorm = input.clone().detach()
     input_unnorm[:, 0, :, :] = input_unnorm[:, 0, :, :] * std_origin[0] + mean_origin[0]
     input_unnorm[:, 1, :, :] = input_unnorm[:, 1, :, :] * std_origin[1] + mean_origin[1]
@@ -124,15 +128,12 @@ def BIM(input, target, model, eps=0.03, k_number=2, alpha=0.01):
 def main():
     global args, logger
     args = get_parser()
-    args.save_path = args.save_path.format(train_num=args.train_num)
-    args.model_path = args.model_path.format(train_num=args.train_num, num_epoch=args.num_epoch)
+    args.save_path = args.save_path.format(attack=args.attack, at_iter=args.at_iter, train_num=args.train_num)
+    args.model_path = args.model_path.format(attack=args.attack, at_iter=args.at_iter, train_num=args.train_num,  num_epoch=args.num_epoch)
     if attack_flag:
-        args.save_folder = os.path.join(
-            args.save_folder.format(train_num=args.train_num, num_epoch=args.num_epoch),
-            f'{args.test_attack}{args.attack_iter}')
+        args.save_folder = os.path.join(args.save_folder.format(attack=args.attack, at_iter=args.at_iter, train_num=args.train_num,  num_epoch=args.num_epoch), f'{args.test_attack}{args.attack_iter}')
     else:
-        args.save_folder = os.path.join(
-            args.save_folder.format(train_num=args.train_num, num_epoch=args.num_epoch), 'clean')
+        args.save_folder = os.path.join(args.save_folder.format(attack=args.attack, at_iter=args.at_iter, train_num=args.train_num, num_epoch=args.num_epoch), 'clean')
 
     if not os.path.exists(args.save_folder):
         os.makedirs(args.save_folder, exist_ok=True)
@@ -179,8 +180,7 @@ def main():
             logger.info("=> loaded checkpoint '{}'".format(args.model_path))
         else:
             raise RuntimeError("=> no checkpoint found at '{}'".format(args.model_path))
-
-        normalize_layer =  torchvision.transforms.Normalize(mean=mean, std=std)
+        normalize_layer = torchvision.transforms.Normalize(mean=mean, std=std)
 
         test(test_loader, test_data.data_list, model, args.classes, mean, std, args.base_size, args.test_h, args.test_w, args.scales, gray_folder, color_folder, colors, normalize_layer)
     if args.split != 'test':
@@ -203,16 +203,16 @@ def net_process(model, image, target, mean, std=None, normalize_layer=None):
         input = torch.cat([input, input.flip(3)], 0)
         target = torch.cat([target, target.flip(2)], 0)
 
+
     if attack_flag:
         adver_input = attacker(input, target, model, optimizer=None,
-                               attack=args.test_attack, k_number=args.attack_iter, source_layer=args.source_layer,
-                               classes=args.classes, std=std, mean=mean, result_path=args.save_folder, args=args,
-                               normalize_layer=normalize_layer, training=False)
+                                         attack=args.test_attack, k_number=args.attack_iter, source_layer=args.source_layer,
+                                         classes=args.classes, std=std, mean=mean, result_path=args.save_folder, args= args, normalize_layer=normalize_layer, training=False)
         with torch.no_grad():
-            output = model(adver_input)
+            output = model(normalize_layer(adver_input)) #NORMALIZE THE INPUT BEFORE PASSING IT TO THE MODEL
     else:
         with torch.no_grad():
-            output = model(input)
+            output = model(normalize_layer(input)) #NORMALIZE THE INPUT BEFORE PASSING IT TO THE MODEL
 
     _, _, h_i, w_i = input.shape
     _, _, h_o, w_o = output.shape
@@ -264,7 +264,7 @@ def scale_process(model, image, target, classes, crop_h, crop_w, h, w, mean, std
     return prediction
 
 
-def test(test_loader, data_list, model, classes, mean, std, base_size, crop_h, crop_w, scales, gray_folder, color_folder, colors):
+def test(test_loader, data_list, model, classes, mean, std, base_size, crop_h, crop_w, scales, gray_folder, color_folder, colors, normalize_layer):
     logger.info('>>>>>>>>>>>>>>>> Start Evaluation >>>>>>>>>>>>>>>>')
     data_time = AverageMeter()
     batch_time = AverageMeter()
@@ -296,7 +296,7 @@ def test(test_loader, data_list, model, classes, mean, std, base_size, crop_h, c
         prediction = np.argmax(prediction, axis=2)
         batch_time.update(time.time() - end)
         end = time.time()
-        if ((i + 1) % 10 == 0) or (i + 1 == len(test_loader)):
+        if ((i + 1) % 100 == 0) or (i + 1 == len(test_loader)):
             logger.info('Test: [{}/{}] '
                         'Data {data_time.val:.3f} ({data_time.avg:.3f}) '
                         'Batch {batch_time.val:.3f} ({batch_time.avg:.3f}).'.format(i + 1, len(test_loader),

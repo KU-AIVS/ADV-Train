@@ -213,3 +213,4 @@ Robust_Semantic_Segmentation/
 pretrain/
 attack/adversarial-attacks-pytorch
 datasets/
+env_path.txt
