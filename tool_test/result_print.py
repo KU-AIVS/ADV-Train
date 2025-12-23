@@ -14,10 +14,8 @@ cv2.ocl.setUseOpenCL(False)
 def get_parser():
     parser = argparse.ArgumentParser(description='PyTorch Semantic Segmentation')
     parser.add_argument('--config', type=str, default='config/ade20k/ade20k_pspnet50.yaml', help='config file')
-    parser.add_argument('--test_attack', type=str)
-    parser.add_argument('--attack')
-    parser.add_argument('--at_iter', type=int)
-    parser.add_argument('--source_layer')
+    parser.add_argument('--attack',default=None)
+    parser.add_argument('--at_iter', type=int, default=None)
     parser.add_argument('--avg', type=int, default=5)
     parser.add_argument('--num_epoch', type=int, default=None)
     parser.add_argument('--train_num', type=int, default=None)
@@ -25,21 +23,14 @@ def get_parser():
     args = parser.parse_args()
     assert args.config is not None
 
-    global attack_flag
-    if args.test_attack:
-        attack_flag = True
-    else:
-        attack_flag = False
 
     cfg = config.load_cfg_from_cfg_file(args.config)
-    cfg.test_attack = args.test_attack
     cfg.attack = args.attack
     cfg.at_iter = args.at_iter
     cfg.avg =args.avg
     cfg.train_num = args.train_num
     cfg.num_epoch = args.num_epoch
 
-    cfg.source_layer = args.source_layer
     if args.opts is not None:
         cfg = config.merge_cfg_from_list(cfg, args.opts)
     return cfg
@@ -110,9 +101,13 @@ def result_avg_test(BASE_DIR):
 def main():
     global args, logger
     args = get_parser()
-    args.save_folder = Path(
-        args.save_folder.format(attack=args.attack, at_iter=args.at_iter, train_num=args.train_num,
-                                num_epoch=args.num_epoch))
+    if args.attack is not None:
+        args.save_folder = Path(
+            args.save_folder.format(attack=args.attack, at_iter=args.at_iter, train_num=args.train_num,
+                                    num_epoch=args.num_epoch))
+    else:
+        args.save_folder = Path(
+            args.save_folder.format(train_num=args.train_num, num_epoch=args.num_epoch))
     if args.train_num is not None:
         logger = get_logger()
         logger.info("Train {} loading results....".format(args.train_num))

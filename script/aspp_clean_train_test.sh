@@ -152,12 +152,12 @@ $PYTHON -u tool_test/voc2012/test_voc_aspp.py \
   2>&1 | tee -a ${result_dir}/test-${num}.log
 
 $PYTHON -u tool_test/result_print.py \
-  --config=${config} --attack=${attack} --at_iter=${at_iter} --source_layer=${source_layer} --num_epoch=${num_epoch} --train_num=${num}\
+  --config=${config} --num_epoch=${num_epoch} --train_num=${num}\
   2>&1 | tee -a ${result_dir}/test-${num}.log
 
 #done
 
 # ------------------------AVERAGE RESULT------------------------
 $PYTHON -u tool_test/result_print.py \
-  --config=${config} --attack=${attack} --at_iter=${at_iter} --source_layer=${source_layer} --num_epoch=${num_epoch} --avg=5\
+  --config=${config} --num_epoch=${num_epoch} --avg=5\
   2>&1 | tee ${exp_dir}/test-adverage.log
