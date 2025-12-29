@@ -20,6 +20,8 @@ def get_parser():
     parser.add_argument('--num_epoch', type=int, default=None)
     parser.add_argument('--train_num', type=int, default=None)
     parser.add_argument('opts', help='see config/ade20k/ade20k_pspnet50.yaml for all options', default=None, nargs=argparse.REMAINDER)
+    parser.add_argument('--source_layer', default=None)
+
     args = parser.parse_args()
     assert args.config is not None
 
@@ -30,7 +32,7 @@ def get_parser():
     cfg.avg =args.avg
     cfg.train_num = args.train_num
     cfg.num_epoch = args.num_epoch
-
+    cfg.source_layer = args.source_layer
     if args.opts is not None:
         cfg = config.merge_cfg_from_list(cfg, args.opts)
     return cfg
@@ -110,6 +112,7 @@ def main():
             args.save_folder.format(train_num=args.train_num, num_epoch=args.num_epoch))
     if args.train_num is not None:
         logger = get_logger()
+        logger.info("Save folder: {}".format(args.save_folder))
         logger.info("Train {} loading results....".format(args.train_num))
         attack_results= result_one_train(args.save_folder)
         logger.info("=> Train {} Results".format(args.train_num))
@@ -118,6 +121,7 @@ def main():
     else:
         BASE_DIR = args.save_folder.parent.parent.parent.parent
         logger = get_logger(BASE_DIR)
+        logger.info("Save folder: {}".format(args.save_folder))
         average_metrics= result_avg_test(BASE_DIR)
         formatted_parts = [
             f"'{key}': {average_metrics[key]:.4f}"

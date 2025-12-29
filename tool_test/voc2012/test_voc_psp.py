@@ -16,8 +16,8 @@ from model.pspnet import PSPNet, DeepLabV3
 from util import dataset, transform, config
 from util.util import AverageMeter, intersectionAndUnion, check_makedirs, colorize
 import torchvision
+from attack.attacker import attacker
 
-from cospgd import functions as attack_funcs
 
 cv2.ocl.setUseOpenCL(False)
 
@@ -25,36 +25,29 @@ cv2.ocl.setUseOpenCL(False)
 def get_parser():
     parser = argparse.ArgumentParser(description='PyTorch Semantic Segmentation')
     parser.add_argument('--config', type=str, default='config/ade20k/ade20k_pspnet50.yaml', help='config file')
-    parser.add_argument('--attack', action='store_true', help='evaluate the model with attack or not')
-    parser.add_argument('--attack_name', type=str, default='BIM', help='name of the attack, default BIM, options: cospgd, segpgd, pgd')
-    parser.add_argument('--attack_iterations', type=int, default=4, help='iterations for the attack')
-    parser.add_argument('--attack_epsilon', type=float, default=0.03, help='epsilon for the attack')
-    parser.add_argument('--attack_alpha', type=float, default=0.01, help='alpha for the attack')
-    parser.add_argument('--gpu_id', type=str, default='0', help='GPU id to be used')
+    parser.add_argument('--test_attack', type=str)
+    parser.add_argument('--attack_iter', type=int)
+    parser.add_argument('--num_epoch', type=int)
+    parser.add_argument('--train_num', type=int)
+
+    parser.add_argument('--source_layer', default='layer3_2')
     parser.add_argument('opts', help='see config/ade20k/ade20k_pspnet50.yaml for all options', default=None, nargs=argparse.REMAINDER)
     args = parser.parse_args()
     assert args.config is not None
 
     global attack_flag
-    global attack_name
-    global attack_iterations
-    global attack_epsilon
-    global attack_alpha
-    global gpu_id
-    
-    if args.attack:
+    if args.test_attack:
         attack_flag = True
     else:
         attack_flag = False
-        
-    attack_name = args.attack_name
-    attack_iterations = args.attack_iterations
-    attack_epsilon = args.attack_epsilon
-    attack_alpha = args.attack_alpha*255
-    gpu_id = args.gpu_id
-    
 
     cfg = config.load_cfg_from_cfg_file(args.config)
+    cfg.test_attack = args.test_attack
+    cfg.attack_iter = args.attack_iter
+    cfg.train_num = args.train_num
+    cfg.source_layer = args.source_layer
+    cfg.num_epoch = args.num_epoch
+
     if args.opts is not None:
         cfg = config.merge_cfg_from_list(cfg, args.opts)
     return cfg
@@ -66,38 +59,66 @@ def get_logger():
     logger.setLevel(logging.INFO)
     handler = logging.StreamHandler()
     fmt = "[%(asctime)s %(levelname)s %(filename)s line %(lineno)d %(process)d] %(message)s"
-    handler.setFormatter(logging.Formatter(fmt))
+    formatter = logging.Formatter(fmt)
+    handler.setFormatter(formatter)
     logger.addHandler(handler)
+    file_handler = logging.FileHandler(f'{args.save_folder}/log.log', mode='a')# 파일명 지정
+    file_handler.setFormatter(formatter)  # 동일한 포맷 적용
+    logger.addHandler(file_handler)  # 로거에 핸들러 추가
+
     return logger
 
 
+def FGSM(input, target, model, clip_min, clip_max, eps=0.2):
+    input_variable = input.detach().clone()
+    input_variable.requires_grad = True
+    model.zero_grad()
+    result = model(input_variable)
+    if args.zoom_factor != 8:
+        h = int((target.size()[1] - 1) / 8 * args.zoom_factor + 1)
+        w = int((target.size()[2] - 1) / 8 * args.zoom_factor + 1)
+        # 'nearest' mode doesn't support align_corners mode and 'bilinear' mode is fine for downsampling
+        target = F.interpolate(target.unsqueeze(1).float(), size=(h, w), mode='bilinear', align_corners=True).squeeze(1).long()
 
-def BIM(input, target, model, normalize_layer=None):
-    global attack_name, attack_iterations, attack_epsilon, attack_alpha
-    
-    orig_images = input.detach().clone()
-    
-    if 'pgd' in attack_name:
-        input = attack_funcs.init_linf(images=input, epsilon=attack_epsilon, clamp_min=0, clamp_max=255)
-    
     ignore_label = 255
-    criterion = nn.CrossEntropyLoss(ignore_index=ignore_label, reduction='none').cuda()
+    criterion = nn.CrossEntropyLoss(ignore_index=ignore_label).cuda()
+    loss = criterion(result, target.detach())
+    loss.backward()
+    res = input_variable.grad
+
+    ################################################################################
+    adversarial_example = input.detach().clone()
+    adversarial_example[:, 0, :, :] = adversarial_example[:, 0, :, :] * std_origin[0] + mean_origin[0]
+    adversarial_example[:, 1, :, :] = adversarial_example[:, 1, :, :] * std_origin[1] + mean_origin[1]
+    adversarial_example[:, 2, :, :] = adversarial_example[:, 2, :, :] * std_origin[2] + mean_origin[2]
+    adversarial_example = adversarial_example + eps * torch.sign(res)
+    adversarial_example = torch.max(adversarial_example, clip_min)
+    adversarial_example = torch.min(adversarial_example, clip_max)
+    adversarial_example = torch.clamp(adversarial_example, min=0.0, max=1.0)
+
+    adversarial_example[:, 0, :, :] = (adversarial_example[:, 0, :, :] - mean_origin[0]) / std_origin[0]
+    adversarial_example[:, 1, :, :] = (adversarial_example[:, 1, :, :] - mean_origin[1]) / std_origin[1]
+    adversarial_example[:, 2, :, :] = (adversarial_example[:, 2, :, :] - mean_origin[2]) / std_origin[2]
+    ################################################################################
+    return adversarial_example
+
+
+
+def BIM(input, target, model, eps=0.03, k_number=2, alpha=0.01):
+    input_unnorm = input.clone().detach()
+    input_unnorm[:, 0, :, :] = input_unnorm[:, 0, :, :] * std_origin[0] + mean_origin[0]
+    input_unnorm[:, 1, :, :] = input_unnorm[:, 1, :, :] * std_origin[1] + mean_origin[1]
+    input_unnorm[:, 2, :, :] = input_unnorm[:, 2, :, :] * std_origin[2] + mean_origin[2]
+    clip_min = input_unnorm - eps
+    clip_max = input_unnorm + eps
 
     adversarial_example = input.detach().clone()
-    
-    for itr in range(attack_iterations):
-        model.zero_grad()
+    adversarial_example.requires_grad = True
+    for mm in range(k_number):
+        adversarial_example = FGSM(adversarial_example, target, model, clip_min, clip_max, eps=alpha)
+        adversarial_example = adversarial_example.detach()
         adversarial_example.requires_grad = True
-        result = model(normalize_layer(adversarial_example)) #NORMALIZE THE INPUT BEFORE PASSING IT TO THE MODEL
-        loss = criterion(result, target.detach())
-        if attack_name.lower()=='cospgd':
-            loss = attack_funcs.cospgd_scale(predictions=result, labels=target, loss=loss, num_classes=21, targeted=False, one_hot=True)
-        elif attack_name.lower()=='segpgd':
-            loss = attack_funcs.segpgd_scale(predictions=result, labels=target, loss=loss, iteration=itr, iterations=attack_iterations, targeted=False)
-        
-        loss.mean().backward()
-        adversarial_example = attack_funcs.step_inf(perturbed_image=adversarial_example, epsilon=attack_epsilon, data_grad=adversarial_example.grad, orig_image=orig_images, alpha=attack_alpha, targeted=False, clamp_min=0, clamp_max=255)
-
+        model.zero_grad()
     return adversarial_example
 
 
@@ -105,9 +126,22 @@ def BIM(input, target, model, normalize_layer=None):
 def main():
     global args, logger, attack_flag, attack_name, attack_iterations, attack_epsilon, attack_alpha, gpu_id
     args = get_parser()
+    args.save_path = args.save_path.format(train_num=args.train_num)
+    args.model_path = args.model_path.format(train_num=args.train_num, num_epoch=args.num_epoch)
+    if attack_flag:
+        args.save_folder = os.path.join(
+            args.save_folder.format(train_num=args.train_num, num_epoch=args.num_epoch),
+            f'{args.test_attack}{args.attack_iter}')
+    else:
+        args.save_folder = os.path.join(
+            args.save_folder.format(train_num=args.train_num, num_epoch=args.num_epoch), 'clean')
+
+    if not os.path.exists(args.save_folder):
+        os.makedirs(args.save_folder, exist_ok=True)
     logger = get_logger()
-    os.environ["CUDA_VISIBLE_DEVICES"] = '{}'.format(gpu_id)
+    # os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(str(x) for x in args.test_gpu)
     logger.info(args)
+
     assert args.classes > 1
     assert args.zoom_factor in [1, 2, 4, 8]
     assert (args.test_h - 1) % 8 == 0 and (args.test_w - 1) % 8 == 0
@@ -121,29 +155,20 @@ def main():
     std = [0.229, 0.224, 0.225]
     std = [item * value_scale for item in std]
 
-    global mean_origin
-    global std_origin
-    mean_origin = [0.485, 0.456, 0.406]
-    std_origin = [0.229, 0.224, 0.225]
-    
-    
-    if attack_flag:
-        args.save_folder = os.path.join(args.save_folder, '{}_attack'.format(attack_name), 'itrs_{}'.format(attack_iterations), 'eps_{}'.format(attack_epsilon), 'alpha_{}'.format(attack_alpha))
-    else:
-        args.save_folder = os.path.join(args.save_folder, 'no_attack')
-
     gray_folder = os.path.join(args.save_folder, 'gray')
     color_folder = os.path.join(args.save_folder, 'color')
 
     test_transform = transform.Compose([transform.ToTensor()])
-    test_data = dataset.SemData(split=args.split, data_root=args.data_root, data_list=args.test_list, transform=test_transform)
+    test_data = dataset.SemData(split=args.split, data_root=args.data_root, data_list=args.test_list,
+                                transform=test_transform)
     index_start = args.index_start
     if args.index_step == 0:
         index_end = len(test_data.data_list)
     else:
         index_end = min(index_start + args.index_step, len(test_data.data_list))
     test_data.data_list = test_data.data_list[index_start:index_end]
-    test_loader = torch.utils.data.DataLoader(test_data, batch_size=1, shuffle=False, num_workers=args.workers, pin_memory=True)
+    test_loader = torch.utils.data.DataLoader(test_data, batch_size=1, shuffle=False, num_workers=args.workers,
+                                              pin_memory=True)
     colors = np.loadtxt(args.colors_path).astype('uint8')
     names = [line.rstrip('\n') for line in open(args.names_path)]
 
@@ -160,10 +185,10 @@ def main():
         else:
             raise RuntimeError("=> no checkpoint found at '{}'".format(args.model_path))
         
-        normalize_layer =  torchvision.transforms.Normalize(mean=mean, std=std)
-        
-        
-        test(test_loader, test_data.data_list, model, args.classes, mean, std, args.base_size, args.test_h, args.test_w, args.scales, gray_folder, color_folder, colors, normalize_layer=normalize_layer)
+        normalize_layer = torchvision.transforms.Normalize(mean=mean, std=std)
+
+        test(test_loader, test_data.data_list, model, args.classes, mean, std, args.base_size, args.test_h, args.test_w,
+             args.scales, gray_folder, color_folder, colors, normalize_layer)
     if args.split != 'test':
         cal_acc(test_data.data_list, gray_folder, args.classes, names)
 
@@ -185,12 +210,15 @@ def net_process(model, image, target, mean, std=None, normalize_layer=None):
         target = torch.cat([target, target.flip(2)], 0)
 
     if attack_flag:
-        adver_input = BIM(input, target, model, normalize_layer=normalize_layer)
+        adver_input = attacker(input, target, model, optimizer=None,
+                               attack=args.test_attack, k_number=args.attack_iter, source_layer=args.source_layer,
+                               classes=args.classes, std=std, mean=mean, result_path=args.save_folder, args=args,
+                               normalize_layer=normalize_layer, training=False)
         with torch.no_grad():
-            output = model(normalize_layer(adver_input)) #NORMALIZE THE INPUT BEFORE PASSING IT TO THE MODEL
+            output = model(normalize_layer(adver_input))  # NORMALIZE THE INPUT BEFORE PASSING IT TO THE MODEL
     else:
         with torch.no_grad():
-            output = model(normalize_layer(input)) #NORMALIZE THE INPUT BEFORE PASSING IT TO THE MODEL
+            output = model(normalize_layer(input))  # NORMALIZE THE INPUT BEFORE PASSING IT TO THE MODEL
 
     _, _, h_i, w_i = input.shape
     _, _, h_o, w_o = output.shape
@@ -206,7 +234,8 @@ def net_process(model, image, target, mean, std=None, normalize_layer=None):
     return output
 
 
-def scale_process(model, image, target, classes, crop_h, crop_w, h, w, mean, std=None, stride_rate=2/3, normalize_layer=None):
+def scale_process(model, image, target, classes, crop_h, crop_w, h, w, mean, std=None, stride_rate=2 / 3,
+                  normalize_layer=None):
     ori_h, ori_w, _ = image.shape
     pad_h = max(crop_h - ori_h, 0)
     pad_w = max(crop_w - ori_w, 0)
@@ -235,7 +264,8 @@ def scale_process(model, image, target, classes, crop_h, crop_w, h, w, mean, std
 
             target_crop = target[s_h:e_h, s_w:e_w].copy()
             count_crop[s_h:e_h, s_w:e_w] += 1
-            prediction_crop[s_h:e_h, s_w:e_w, :] += net_process(model, image_crop, target_crop, mean, std, normalize_layer)
+            prediction_crop[s_h:e_h, s_w:e_w, :] += net_process(model, image_crop, target_crop, mean, std,
+                                                                normalize_layer)
     prediction_crop /= np.expand_dims(count_crop, 2)
     prediction_crop = prediction_crop[pad_h_half:pad_h_half+ori_h, pad_w_half:pad_w_half+ori_w]
     prediction = cv2.resize(prediction_crop, (w, h), interpolation=cv2.INTER_LINEAR)

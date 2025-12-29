@@ -17,7 +17,6 @@ from util import dataset, transform, config
 from util.util import AverageMeter, intersectionAndUnion, check_makedirs, colorize
 from attack.attacker import attacker
 import torchvision
-import random
 
 cv2.ocl.setUseOpenCL(False)
 
@@ -26,13 +25,11 @@ def get_parser():
     parser = argparse.ArgumentParser(description='PyTorch Semantic Segmentation')
     parser.add_argument('--config', type=str, default='config/ade20k/ade20k_pspnet50.yaml', help='config file')
     parser.add_argument('--test_attack', type=str)
-    parser.add_argument('--attack')
-    parser.add_argument('--at_iter', type=int)
     parser.add_argument('--attack_iter', type=int)
     parser.add_argument('--num_epoch', type=int)
     parser.add_argument('--train_num', type=int)
-    parser.add_argument('--seed', default=42, type=int)
-    parser.add_argument('--source_layer', default='layer3_2')
+
+    parser.add_argument('--source_layer', default=None)
     parser.add_argument('opts', help='see config/ade20k/ade20k_pspnet50.yaml for all options', default=None, nargs=argparse.REMAINDER)
     args = parser.parse_args()
     assert args.config is not None
@@ -45,9 +42,6 @@ def get_parser():
 
     cfg = config.load_cfg_from_cfg_file(args.config)
     cfg.test_attack = args.test_attack
-    cfg.seed = args.seed
-    cfg.attack = args.attack
-    cfg.at_iter = args.at_iter
     cfg.attack_iter = args.attack_iter
     cfg.train_num = args.train_num
     cfg.source_layer = args.source_layer
@@ -109,7 +103,7 @@ def FGSM(input, target, model, clip_min, clip_max, eps=0.2):
 
 
 
-def BIM(input, target, model, eps=0.03, k_number=20, alpha=0.01):
+def BIM(input, target, model, eps=0.03, k_number=2, alpha=0.01):
     input_unnorm = input.clone().detach()
     input_unnorm[:, 0, :, :] = input_unnorm[:, 0, :, :] * std_origin[0] + mean_origin[0]
     input_unnorm[:, 1, :, :] = input_unnorm[:, 1, :, :] * std_origin[1] + mean_origin[1]
@@ -127,24 +121,18 @@ def BIM(input, target, model, eps=0.03, k_number=20, alpha=0.01):
     return adversarial_example
 
 
+
 def main():
     global args, logger
     args = get_parser()
-    seed = args.seed
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    print('> SEEDING DONE')
-    args.save_path = args.save_path.format(attack=args.attack, at_iter=args.at_iter, train_num=args.train_num)
-    args.model_path = args.model_path.format(attack=args.attack, at_iter=args.at_iter, train_num=args.train_num,  num_epoch=args.num_epoch)
+    args.save_path = args.save_path.format(train_num=args.train_num)
+    args.model_path = args.model_path.format( train_num=args.train_num, num_epoch=args.num_epoch)
     if attack_flag:
-        args.save_folder = os.path.join(args.save_folder.format(attack=args.attack, at_iter=args.at_iter, train_num=args.train_num,  num_epoch=args.num_epoch), f'{args.test_attack}{args.attack_iter}')
+        args.save_folder = os.path.join(
+            args.save_folder.format(train_num=args.train_num, num_epoch=args.num_epoch), f'transfer_psp_{args.test_attack}{args.attack_iter}')
     else:
-        args.save_folder = os.path.join(args.save_folder.format(attack=args.attack, at_iter=args.at_iter, train_num=args.train_num, num_epoch=args.num_epoch), 'clean')
+        args.save_folder = os.path.join(
+            args.save_folder.format(train_num=args.train_num, num_epoch=args.num_epoch), 'clean')
 
     if not os.path.exists(args.save_folder):
         os.makedirs(args.save_folder, exist_ok=True)
@@ -173,38 +161,48 @@ def main():
     color_folder = os.path.join(args.save_folder, 'color')
 
     test_transform = transform.Compose([transform.ToTensor()])
-    test_data = dataset.SemData(split=args.split, data_root=args.data_root, data_list=args.test_list, transform=test_transform)
+    test_data = dataset.SemData(split=args.split, data_root=args.data_root, data_list=args.test_list,
+                                transform=test_transform)
     index_start = args.index_start
     if args.index_step == 0:
         index_end = len(test_data.data_list)
     else:
         index_end = min(index_start + args.index_step, len(test_data.data_list))
     test_data.data_list = test_data.data_list[index_start:index_end]
-    test_loader = torch.utils.data.DataLoader(test_data, batch_size=1, shuffle=False, num_workers=args.workers, pin_memory=True)
+    test_loader = torch.utils.data.DataLoader(test_data, batch_size=1, shuffle=False, num_workers=args.workers,
+                                              pin_memory=True)
     colors = np.loadtxt(args.colors_path).astype('uint8')
     names = [line.rstrip('\n') for line in open(args.names_path)]
 
     if not args.has_prediction:
-        model = DeepLabV3(layers=args.layers, classes=args.classes, zoom_factor=args.zoom_factor, pretrained=False)
+        model = PSPNet(layers=args.layers, classes=args.classes, zoom_factor=args.zoom_factor, pretrained=False)
+        target_model = DeepLabV3(layers=args.layers, classes=args.classes, zoom_factor=args.zoom_factor, pretrained=False)
+
         logger.info(model)
         model = torch.nn.DataParallel(model).cuda()
+        target_model = torch.nn.DataParallel(target_model).cuda()
         cudnn.benchmark = True
         if os.path.isfile(args.model_path):
             logger.info("=> loading checkpoint '{}'".format(args.model_path))
             checkpoint = torch.load(args.model_path)
             model.load_state_dict(checkpoint['state_dict'], strict=False)
+            target_checkpoint = torch.load('exp/voc2012/aspp/1/model/train_epoch_50.pth')
+            target_model.load_state_dict(target_checkpoint['state_dict'], strict=False)
+
+
             logger.info("=> loaded checkpoint '{}'".format(args.model_path))
         else:
             raise RuntimeError("=> no checkpoint found at '{}'".format(args.model_path))
 
-        normalize_layer =  torchvision.transforms.Normalize(mean=mean, std=std)
+        normalize_layer = torchvision.transforms.Normalize(mean=mean, std=std)
 
-        test(test_loader, test_data.data_list, model, args.classes, mean, std, args.base_size, args.test_h, args.test_w, args.scales, gray_folder, color_folder, colors, normalize_layer)
+        test(test_loader, test_data.data_list, model, args.classes, mean, std, args.base_size, args.test_h, args.test_w,
+             args.scales, gray_folder, color_folder, colors, normalize_layer, target_model)
     if args.split != 'test':
         cal_acc(test_data.data_list, gray_folder, args.classes, names)
 
 
-def net_process(model, image, target, mean, std=None, normalize_layer=None):
+def net_process(model, image, target, mean, std=None, normalize_layer=None, target_model=None):
     input = torch.from_numpy(image.transpose((2, 0, 1))).float()
     target = torch.from_numpy(target).long()
 
@@ -222,20 +220,14 @@ def net_process(model, image, target, mean, std=None, normalize_layer=None):
 
     if attack_flag:
         adver_input = attacker(input, target, model, optimizer=None,
-                                         attack=args.test_attack, k_number=args.attack_iter, source_layer=args.source_layer,
-                                         classes=args.classes, std=std, mean=mean, result_path=args.save_folder, args= args, normalize_layer=normalize_layer, training=False)
-        # if 'bim' in args.test_attack:
-        #     adver_input = BIM(input, target, model, eps=0.03, k_number=args.attack_iter, alpha=0.01,)
-        # else:
-        #     adver_input = attacker(input, target, model, criterion=None, optimizer=None,
-        #                                  attack=args.test_attack, k_number=args.attack_iter, source_layer=args.source_layer,
-        #                                  classes=args.classes, std_origin=std_origin, mean_origin=mean_origin, result_path=args.save_folder)
-
+                               attack=args.test_attack, k_number=args.attack_iter, source_layer=args.source_layer,
+                               classes=args.classes, std=std, mean=mean, result_path=args.save_folder, args=args,
+                               normalize_layer=normalize_layer, training=False)
         with torch.no_grad():
-            output = model(normalize_layer(adver_input)) #NORMALIZE THE INPUT BEFORE PASSING IT TO THE MODEL
+            output = target_model(normalize_layer(adver_input))  # NORMALIZE THE INPUT BEFORE PASSING IT TO THE MODEL
     else:
         with torch.no_grad():
-            output = model(normalize_layer(input)) #NORMALIZE THE INPUT BEFORE PASSING IT TO THE MODEL
+            output = target_model(normalize_layer(input))  # NORMALIZE THE INPUT BEFORE PASSING IT TO THE MODEL
 
     _, _, h_i, w_i = input.shape
     _, _, h_o, w_o = output.shape
@@ -251,21 +243,24 @@ def net_process(model, image, target, mean, std=None, normalize_layer=None):
     return output
 
 
-def scale_process(model, image, target, classes, crop_h, crop_w, h, w, mean, std=None, stride_rate=2/3, normalize_layer=None):
+def scale_process(model, image, target, classes, crop_h, crop_w, h, w, mean, std=None, stride_rate=2 / 3,
+                  normalize_layer=None, target_model=None):
     ori_h, ori_w, _ = image.shape
     pad_h = max(crop_h - ori_h, 0)
     pad_w = max(crop_w - ori_w, 0)
     pad_h_half = int(pad_h / 2)
     pad_w_half = int(pad_w / 2)
     if pad_h > 0 or pad_w > 0:
-        image = cv2.copyMakeBorder(image, pad_h_half, pad_h - pad_h_half, pad_w_half, pad_w - pad_w_half, cv2.BORDER_CONSTANT, value=mean)
-        target = cv2.copyMakeBorder(target, pad_h_half, pad_h - pad_h_half, pad_w_half, pad_w - pad_w_half, cv2.BORDER_CONSTANT, value=255)
+        image = cv2.copyMakeBorder(image, pad_h_half, pad_h - pad_h_half, pad_w_half, pad_w - pad_w_half,
+                                   cv2.BORDER_CONSTANT, value=mean)
+        target = cv2.copyMakeBorder(target, pad_h_half, pad_h - pad_h_half, pad_w_half, pad_w - pad_w_half,
+                                    cv2.BORDER_CONSTANT, value=255)
 
     new_h, new_w, _ = image.shape
-    stride_h = int(np.ceil(crop_h*stride_rate))
-    stride_w = int(np.ceil(crop_w*stride_rate))
-    grid_h = int(np.ceil(float(new_h-crop_h)/stride_h) + 1)
-    grid_w = int(np.ceil(float(new_w-crop_w)/stride_w) + 1)
+    stride_h = int(np.ceil(crop_h * stride_rate))
+    stride_w = int(np.ceil(crop_w * stride_rate))
+    grid_h = int(np.ceil(float(new_h - crop_h) / stride_h) + 1)
+    grid_w = int(np.ceil(float(new_w - crop_w) / stride_w) + 1)
     prediction_crop = np.zeros((new_h, new_w, classes), dtype=float)
     count_crop = np.zeros((new_h, new_w), dtype=float)
     for index_h in range(0, grid_h):
@@ -280,18 +275,20 @@ def scale_process(model, image, target, classes, crop_h, crop_w, h, w, mean, std
 
             target_crop = target[s_h:e_h, s_w:e_w].copy()
             count_crop[s_h:e_h, s_w:e_w] += 1
-            prediction_crop[s_h:e_h, s_w:e_w, :] += net_process(model, image_crop, target_crop, mean, std, normalize_layer)
+            prediction_crop[s_h:e_h, s_w:e_w, :] += net_process(model, image_crop, target_crop, mean, std,
+                                                                normalize_layer, target_model)
     prediction_crop /= np.expand_dims(count_crop, 2)
-    prediction_crop = prediction_crop[pad_h_half:pad_h_half+ori_h, pad_w_half:pad_w_half+ori_w]
+    prediction_crop = prediction_crop[pad_h_half:pad_h_half + ori_h, pad_w_half:pad_w_half + ori_w]
     prediction = cv2.resize(prediction_crop, (w, h), interpolation=cv2.INTER_LINEAR)
     return prediction
 
 
-def test(test_loader, data_list, model, classes, mean, std, base_size, crop_h, crop_w, scales, gray_folder, color_folder, colors, normalize_layer):
+def test(test_loader, data_list, model, classes, mean, std, base_size, crop_h, crop_w, scales, gray_folder, color_folder, colors, normalize_layer, target_model):
     logger.info('>>>>>>>>>>>>>>>> Start Evaluation >>>>>>>>>>>>>>>>')
     data_time = AverageMeter()
     batch_time = AverageMeter()
     model.eval()
+    target_model.eval()
     end = time.time()
     for i, (input, target) in enumerate(test_loader):
         data_time.update(time.time() - end)
@@ -310,14 +307,14 @@ def test(test_loader, data_list, model, classes, mean, std, base_size, crop_h, c
             new_h = long_size
             new_w = long_size
             if h > w:
-                new_w = round(long_size/float(h)*w)
+                new_w = round(long_size / float(h) * w)
             else:
-                new_h = round(long_size/float(w)*h)
+                new_h = round(long_size / float(w) * h)
 
             image_scale = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
             target_scale = cv2.resize(target.astype(np.uint8), (new_w, new_h), interpolation=cv2.INTER_NEAREST)
 
-            prediction += scale_process(model, image_scale, target_scale, classes, crop_h, crop_w, h, w, mean, std, normalize_layer=normalize_layer)
+            prediction += scale_process(model, image_scale, target_scale, classes, crop_h, crop_w, h, w, mean, std, normalize_layer=normalize_layer, target_model=target_model)
         prediction /= len(scales)
         prediction = np.argmax(prediction, axis=2)
         batch_time.update(time.time() - end)
@@ -345,7 +342,7 @@ def cal_acc(data_list, pred_folder, classes, names):
 
     for i, (image_path, target_path) in enumerate(data_list):
         image_name = image_path.split('/')[-1].split('.')[0]
-        pred = cv2.imread(os.path.join(pred_folder, image_name+'.png'), cv2.IMREAD_GRAYSCALE)
+        pred = cv2.imread(os.path.join(pred_folder, image_name + '.png'), cv2.IMREAD_GRAYSCALE)
         target = cv2.imread(target_path, cv2.IMREAD_GRAYSCALE)
 
         intersection, union, target = intersectionAndUnion(pred, target, classes)
@@ -353,7 +350,7 @@ def cal_acc(data_list, pred_folder, classes, names):
         union_meter.update(union)
         target_meter.update(target)
         accuracy = sum(intersection_meter.val) / (sum(target_meter.val) + 1e-10)
-        logger.info('Evaluating {0}/{1} on image {2}, accuracy {3:.4f}.'.format(i + 1, len(data_list), image_name+'.png', accuracy))
+        logger.info('Evaluating {0}/{1} on image {2}, accuracy {3:.4f}.'.format(i + 1, len(data_list), image_name + '.png', accuracy))
 
     iou_class = intersection_meter.sum / (union_meter.sum + 1e-10)
     accuracy_class = intersection_meter.sum / (target_meter.sum + 1e-10)

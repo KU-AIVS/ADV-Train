@@ -15,7 +15,7 @@ import torch.optim
 import torch.utils.data
 import torch.multiprocessing as mp
 import torch.distributed as dist
-from lib.sync_bn.modules import BatchNorm2d
+from torch.nn import SyncBatchNorm as BatchNorm2d
 import apex
 from tensorboardX import SummaryWriter
 

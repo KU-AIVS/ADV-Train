@@ -18,8 +18,6 @@ from util.util import AverageMeter, intersectionAndUnion, check_makedirs, colori
 import torchvision
 from attack.attacker import attacker
 
-from cospgd import functions as attack_funcs
-
 cv2.ocl.setUseOpenCL(False)
 
 
