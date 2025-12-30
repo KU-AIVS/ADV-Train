@@ -14,7 +14,7 @@ def loss_fpd_margin_fg_ctx_harmonic(
     min_samples_per_class: int = 8,
     use_class_conditional: bool = True,   # True: class별 L_fg, False: global L_fg
     use_margin: bool = True,              # False면 feature-only FPD
-    use_log_scale: bool = False,          # log(1+J) 사용할지
+    use_log_scale: bool = True,          # log(1+J) 사용할지
     background_class: Optional[int] = 0,  # ctx로 보는 class (ex: 0=background), None이면 ctx 비활성
 ) -> torch.Tensor:
     r"""

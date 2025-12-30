@@ -18,17 +18,21 @@ model_dir=${exp_dir}/model
 result_dir=${exp_dir}/result
 config=config/${dataset}/${dataset}_${exp_name}.yaml
 now=$(date +"%Y%m%d_%H%M%S")
+num_epoch=50
+export PYTHONPATH=./
 
 mkdir -p ${model_dir} ${result_dir}
 cp script/aspp_adv_train_test.sh tool_train/train_at_aspp.py ${config} ${exp_dir}
-export PYTHONPATH=./
 $PYTHON -u tool_train/train_at_aspp.py \
   --config=${config}  --attack=${attack} --at_iter=${at_iter} --source_layer=${source_layer} --train_num=${num}\
   2>&1 | tee ${model_dir}/train-$now.log
 
 # ------------------------TEST------------------------
-num_epoch=50
 cp tool_test/voc2012/test_voc_aspp_at.py ${exp_dir}
+$PYTHON -u tool_test/voc2012/test_voc_aspp_at.py \
+  --config=${config} --attack=${attack} --at_iter=${at_iter} --num_epoch=${num_epoch} --train_num=${num}\
+  2>&1 | tee ${result_dir}/test-Clean.log
+
 for attack_iter in 1 3 5 7 10 20
 do
 #PGD
@@ -54,7 +58,7 @@ $PYTHON -u tool_test/result_print.py \
   2>&1 | tee -a ${result_dir}/test-${num}.log
 #done
 
-# ------------------------AVERAGE RESULT------------------------
-$PYTHON -u tool_test/result_print.py \
-  --config=${config} --attack=${attack} --at_iter=${at_iter} --num_epoch=${num_epoch} --avg=5\
-  2>&1 | tee ${exp_dir}/test-adverage.log
+## ------------------------AVERAGE RESULT------------------------
+#$PYTHON -u tool_test/result_print.py \
+#  --config=${config} --attack=${attack} --at_iter=${at_iter} --num_epoch=${num_epoch} --avg=5\
+#  2>&1 | tee ${exp_dir}/test-adverage.log
