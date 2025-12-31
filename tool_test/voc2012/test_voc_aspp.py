@@ -28,8 +28,9 @@ def get_parser():
     parser.add_argument('--attack_iter', type=int)
     parser.add_argument('--num_epoch', type=int)
     parser.add_argument('--train_num', type=int)
+    parser.add_argument('--fusion', type=bool, default=False)
 
-    parser.add_argument('--source_layer', default=None)
+    parser.add_argument('--source_layer', default='layer3_2')
     parser.add_argument('opts', help='see config/ade20k/ade20k_pspnet50.yaml for all options', default=None, nargs=argparse.REMAINDER)
     args = parser.parse_args()
     assert args.config is not None
@@ -42,6 +43,7 @@ def get_parser():
 
     cfg = config.load_cfg_from_cfg_file(args.config)
     cfg.test_attack = args.test_attack
+    cfg.fusion = args.fusion
     cfg.attack_iter = args.attack_iter
     cfg.train_num = args.train_num
     cfg.source_layer = args.source_layer
@@ -133,6 +135,8 @@ def main():
     else:
         args.save_folder = os.path.join(
             args.save_folder.format(train_num=args.train_num, num_epoch=args.num_epoch), 'clean')
+    if args.fusion:
+        args.save_folder = args.save_folder + '_fusion'
 
     if not os.path.exists(args.save_folder):
         os.makedirs(args.save_folder, exist_ok=True)
@@ -190,12 +194,12 @@ def main():
         normalize_layer = torchvision.transforms.Normalize(mean=mean, std=std)
 
         test(test_loader, test_data.data_list, model, args.classes, mean, std, args.base_size, args.test_h, args.test_w,
-             args.scales, gray_folder, color_folder, colors, normalize_layer)
+             args.scales, gray_folder, color_folder, colors, normalize_layer, args.fusion)
     if args.split != 'test':
         cal_acc(test_data.data_list, gray_folder, args.classes, names)
 
 
-def net_process(model, image, target, mean, std=None, normalize_layer=None):
+def net_process(model, image, target, mean, std=None, normalize_layer=None, fusion=False):
     input = torch.from_numpy(image.transpose((2, 0, 1))).float()
     target = torch.from_numpy(target).long()
 
@@ -215,7 +219,7 @@ def net_process(model, image, target, mean, std=None, normalize_layer=None):
         adver_input = attacker(input, target, model, optimizer=None,
                                attack=args.test_attack, k_number=args.attack_iter, source_layer=args.source_layer,
                                classes=args.classes, std=std, mean=mean, result_path=args.save_folder, args=args,
-                               normalize_layer=normalize_layer, training=False)
+                               normalize_layer=normalize_layer, training=False, fusion=fusion)
         with torch.no_grad():
             output = model(normalize_layer(adver_input))  # NORMALIZE THE INPUT BEFORE PASSING IT TO THE MODEL
     else:
@@ -237,7 +241,7 @@ def net_process(model, image, target, mean, std=None, normalize_layer=None):
 
 
 def scale_process(model, image, target, classes, crop_h, crop_w, h, w, mean, std=None, stride_rate=2 / 3,
-                  normalize_layer=None):
+                  normalize_layer=None, fusion=False):
     ori_h, ori_w, _ = image.shape
     pad_h = max(crop_h - ori_h, 0)
     pad_w = max(crop_w - ori_w, 0)
@@ -269,14 +273,15 @@ def scale_process(model, image, target, classes, crop_h, crop_w, h, w, mean, std
             target_crop = target[s_h:e_h, s_w:e_w].copy()
             count_crop[s_h:e_h, s_w:e_w] += 1
             prediction_crop[s_h:e_h, s_w:e_w, :] += net_process(model, image_crop, target_crop, mean, std,
-                                                                normalize_layer)
+                                                                normalize_layer, fusion)
     prediction_crop /= np.expand_dims(count_crop, 2)
     prediction_crop = prediction_crop[pad_h_half:pad_h_half + ori_h, pad_w_half:pad_w_half + ori_w]
     prediction = cv2.resize(prediction_crop, (w, h), interpolation=cv2.INTER_LINEAR)
     return prediction
 
 
-def test(test_loader, data_list, model, classes, mean, std, base_size, crop_h, crop_w, scales, gray_folder, color_folder, colors, normalize_layer):
+def test(test_loader, data_list, model, classes, mean, std, base_size, crop_h, crop_w, scales,
+         gray_folder, color_folder, colors, normalize_layer, fusion=False):
     logger.info('>>>>>>>>>>>>>>>> Start Evaluation >>>>>>>>>>>>>>>>')
     data_time = AverageMeter()
     batch_time = AverageMeter()
@@ -306,7 +311,8 @@ def test(test_loader, data_list, model, classes, mean, std, base_size, crop_h, c
             image_scale = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
             target_scale = cv2.resize(target.astype(np.uint8), (new_w, new_h), interpolation=cv2.INTER_NEAREST)
 
-            prediction += scale_process(model, image_scale, target_scale, classes, crop_h, crop_w, h, w, mean, std, normalize_layer=normalize_layer)
+            prediction += scale_process(model, image_scale, target_scale, classes, crop_h, crop_w, h, w,
+                                        mean, std, normalize_layer=normalize_layer, fusion=fusion)
         prediction /= len(scales)
         prediction = np.argmax(prediction, axis=2)
         batch_time.update(time.time() - end)

@@ -28,7 +28,7 @@ def get_source_layer(model, source_layer):
 
 def attacker(input, target, model, optimizer,
              attack, k_number, source_layer, classes,
-             std, mean, eps=0.03, alpha=0.01, result_path=None, args=None, normalize_layer=None, training=True):
+             std, mean, eps=0.03, alpha=0.01, result_path=None, args=None, normalize_layer=None, training=True, fusion=False):
     ignore_label = 255
     criterion = torch.nn.CrossEntropyLoss(ignore_index=ignore_label, reduction='none').cuda()
     if training:
@@ -89,6 +89,7 @@ def attacker(input, target, model, optimizer,
             # adversarial_example = input[i:i+1].detach().clone()
 
             for mm in range(k_number):
+
                 model.zero_grad()
                 adversarial_example.requires_grad = True
 
@@ -123,51 +124,60 @@ def attacker(input, target, model, optimizer,
                 else:
                     loss = criterion(result.float(), target[i:i + 1].detach())
 
-                if attack == 'cospgd':
-                    loss = functions.cospgd_scale(
-                        predictions=result,
-                        labels=target[i:i+1],
-                        loss=loss,
-                        num_classes=classes,
-                        targeted = False,
-                        one_hot = True
-                    )
-                elif attack == 'segpgd':
-                    loss = functions.segpgd_scale(
-                        predictions=result,
-                        labels=target[i:i+1],
-                        loss=loss,
-                        iteration=mm,
-                        iterations=k_number,
-                        targeted=False
-                    )
-                elif attack == 'pgd':
-                    loss = functions.pgd_scale(loss=loss)
-                elif attack == 'fspgd':
-                    loss = functions.fspgd_scale(
-                        mid_original=mid_original,
-                        mid_adv=mid_adv,
-                        iteration=mm,
-                        iterations=k_number,
-                    )
-                elif attack == 'rppgd':
-                    loss, S = functions.rppgd_scale(
-                        predictions=result,
-                        labels=target[i:i+1],
-                        loss = loss,
-                        mid_adv=mid_adv,
-                        iteration=mm,
-                        iterations=k_number,
-                        S=S
-                    )
-                elif attack == 'fs_yg':
+                if fusion and mm==0:
                     loss = functions.yg_loss(
                         feat_clean=mid_original,
                         feat_adv=mid_adv,
                         logits_clean=orig_result,
                         logits_adv=result,
-                        labels=target[i:i+1].long(),
+                        labels=target[i:i + 1].long(),
                     )
+                else:
+                    if attack == 'cospgd':
+                        loss = functions.cospgd_scale(
+                            predictions=result,
+                            labels=target[i:i+1],
+                            loss=loss,
+                            num_classes=classes,
+                            targeted = False,
+                            one_hot = True
+                        )
+                    elif attack == 'segpgd':
+                        loss = functions.segpgd_scale(
+                            predictions=result,
+                            labels=target[i:i+1],
+                            loss=loss,
+                            iteration=mm,
+                            iterations=k_number,
+                            targeted=False
+                        )
+                    elif attack == 'pgd':
+                        loss = functions.pgd_scale(loss=loss)
+                    elif attack == 'fspgd':
+                        loss = functions.fspgd_scale(
+                            mid_original=mid_original,
+                            mid_adv=mid_adv,
+                            iteration=mm,
+                            iterations=k_number,
+                        )
+                    elif attack == 'rppgd':
+                        loss, S = functions.rppgd_scale(
+                            predictions=result,
+                            labels=target[i:i+1],
+                            loss = loss,
+                            mid_adv=mid_adv,
+                            iteration=mm,
+                            iterations=k_number,
+                            S=S
+                        )
+                    elif attack == 'fs_yg':
+                        loss = functions.yg_loss(
+                            feat_clean=mid_original,
+                            feat_adv=mid_adv,
+                            logits_clean=orig_result,
+                            logits_adv=result,
+                            labels=target[i:i+1].long(),
+                        )
 
                 if args.use_apex and args.multiprocessing_distributed and training:
                     with apex.amp.scale_loss(loss.mean(), optimizer) as scaled_loss:

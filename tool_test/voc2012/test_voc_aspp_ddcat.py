@@ -16,6 +16,7 @@ from model.pspnet import PSPNet_DDCAT, DeepLabV3_DDCAT
 from util import dataset, transform, config
 from util.util import AverageMeter, intersectionAndUnion, check_makedirs, colorize
 from attack.attacker import attacker
+import torchvision
 
 cv2.ocl.setUseOpenCL(False)
 
@@ -24,9 +25,13 @@ def get_parser():
     parser = argparse.ArgumentParser(description='PyTorch Semantic Segmentation')
     parser.add_argument('--config', type=str, default='config/ade20k/ade20k_pspnet50.yaml', help='config file')
     parser.add_argument('--test_attack', type=str)
-    parser.add_argument('opts', help='see config/ade20k/ade20k_pspnet50.yaml for all options', default=None, nargs=argparse.REMAINDER)
-    parser.add_argument('--source_layer', default='layer3_2')
+    parser.add_argument('--attack_iter', type=int)
+    parser.add_argument('--num_epoch', type=int)
+    parser.add_argument('--train_num', type=int)
+    parser.add_argument('--fusion', type=bool, default=False)
 
+    parser.add_argument('--source_layer', default='layer3_2')
+    parser.add_argument('opts', help='see config/ade20k/ade20k_pspnet50.yaml for all options', default=None, nargs=argparse.REMAINDER)
     args = parser.parse_args()
     assert args.config is not None
 
@@ -37,8 +42,13 @@ def get_parser():
         attack_flag = False
 
     cfg = config.load_cfg_from_cfg_file(args.config)
-    cfg.source_layer = args.source_layer
     cfg.test_attack = args.test_attack
+    cfg.fusion = args.fusion
+    cfg.attack_iter = args.attack_iter
+    cfg.train_num = args.train_num
+    cfg.source_layer = args.source_layer
+    cfg.num_epoch = args.num_epoch
+
     if args.opts is not None:
         cfg = config.merge_cfg_from_list(cfg, args.opts)
     return cfg
@@ -113,11 +123,20 @@ def BIM(input, target, model, eps=0.03, k_number=2, alpha=0.01):
     return adversarial_example
 
 
+
 def main():
     global args, logger
     args = get_parser()
+    args.save_path = args.save_path.format(train_num=args.train_num)
     if attack_flag:
-        args.save_folder = os.path.join(args.save_folder, args.test_attack)
+        args.save_folder = os.path.join(
+            args.save_folder.format(train_num=args.train_num, num_epoch=args.num_epoch), f'{args.test_attack}{args.attack_iter}')
+    else:
+        args.save_folder = os.path.join(
+            args.save_folder.format(train_num=args.train_num, num_epoch=args.num_epoch), 'clean')
+    if args.fusion:
+        args.save_folder = args.save_folder + '_fusion'
+
     if not os.path.exists(args.save_folder):
         os.makedirs(args.save_folder, exist_ok=True)
     logger = get_logger()
@@ -136,23 +155,25 @@ def main():
     std = [0.229, 0.224, 0.225]
     std = [item * value_scale for item in std]
 
-    global mean_origin
-    global std_origin
-    mean_origin = [0.485, 0.456, 0.406]
-    std_origin = [0.229, 0.224, 0.225]
+    # global mean_origin
+    # global std_origin
+    # mean_origin = [0.485, 0.456, 0.406]
+    # std_origin = [0.229, 0.224, 0.225]
 
     gray_folder = os.path.join(args.save_folder, 'gray')
     color_folder = os.path.join(args.save_folder, 'color')
 
     test_transform = transform.Compose([transform.ToTensor()])
-    test_data = dataset.SemData(split=args.split, data_root=args.data_root, data_list=args.test_list, transform=test_transform)
+    test_data = dataset.SemData(split=args.split, data_root=args.data_root, data_list=args.test_list,
+                                transform=test_transform)
     index_start = args.index_start
     if args.index_step == 0:
         index_end = len(test_data.data_list)
     else:
         index_end = min(index_start + args.index_step, len(test_data.data_list))
     test_data.data_list = test_data.data_list[index_start:index_end]
-    test_loader = torch.utils.data.DataLoader(test_data, batch_size=1, shuffle=False, num_workers=args.workers, pin_memory=True)
+    test_loader = torch.utils.data.DataLoader(test_data, batch_size=1, shuffle=False, num_workers=args.workers,
+                                              pin_memory=True)
     colors = np.loadtxt(args.colors_path).astype('uint8')
     names = [line.rstrip('\n') for line in open(args.names_path)]
 
@@ -168,21 +189,19 @@ def main():
             logger.info("=> loaded checkpoint '{}'".format(args.model_path))
         else:
             raise RuntimeError("=> no checkpoint found at '{}'".format(args.model_path))
-        test(test_loader, test_data.data_list, model, args.classes, mean, std, args.base_size, args.test_h, args.test_w, args.scales, gray_folder, color_folder, colors)
+
+        normalize_layer = torchvision.transforms.Normalize(mean=mean, std=std)
+
+        test(test_loader, test_data.data_list, model, args.classes, mean, std, args.base_size, args.test_h, args.test_w,
+             args.scales, gray_folder, color_folder, colors, normalize_layer, args.fusion)
     if args.split != 'test':
         cal_acc(test_data.data_list, gray_folder, args.classes, names)
 
 
-def net_process(model, image, target, mean, std=None):
+def net_process(model, image, target, mean, std=None, normalize_layer=None, fusion=False):
     input = torch.from_numpy(image.transpose((2, 0, 1))).float()
     target = torch.from_numpy(target).long()
 
-    if std is None:
-        for t, m in zip(input, mean):
-            t.sub_(m)
-    else:
-        for t, m, s in zip(input, mean, std):
-            t.sub_(m).div_(s)
     input = input.unsqueeze(0).cuda()
     target = target.unsqueeze(0).cuda()
 
@@ -196,26 +215,15 @@ def net_process(model, image, target, mean, std=None):
         target = torch.cat([target, target.flip(2)], 0)
 
     if attack_flag:
-        if 'bim' in args.test_attack:
-            import re
-            def split_text_number(s):
-                match = re.match(r"([a-zA-Z]+)(\d+)", s)
-                if match:
-                    text_part = match.group(1)
-                    number_part = match.group(2)
-                    return text_part, int(number_part)  # 숫자는 정수형으로 변환
-                return s
-            attack, k_number = split_text_number(args.test_attack)
-            adver_input = BIM(input, target, model, eps=0.03, k_number=k_number, alpha=0.01)
-        else:
-            adver_input = attacker(input, target, model, criterion=None, optimizer=None,
-                                         attack=args.test_attack, source_layer=args.source_layer,
-                                         classes=args.classes, std_origin=std_origin, mean_origin=mean_origin)
+        adver_input = attacker(input, target, model, optimizer=None,
+                               attack=args.test_attack, k_number=args.attack_iter, source_layer=args.source_layer,
+                               classes=args.classes, std=std, mean=mean, result_path=args.save_folder, args=args,
+                               normalize_layer=normalize_layer, training=False, fusion=fusion)
         with torch.no_grad():
-            output = model(adver_input)
+            output = model(normalize_layer(adver_input))  # NORMALIZE THE INPUT BEFORE PASSING IT TO THE MODEL
     else:
         with torch.no_grad():
-            output = model(input)
+            output = model(normalize_layer(input))  # NORMALIZE THE INPUT BEFORE PASSING IT TO THE MODEL
 
     _, _, h_i, w_i = input.shape
     _, _, h_o, w_o = output.shape
@@ -231,21 +239,24 @@ def net_process(model, image, target, mean, std=None):
     return output
 
 
-def scale_process(model, image, target, classes, crop_h, crop_w, h, w, mean, std=None, stride_rate=2/3):
+def scale_process(model, image, target, classes, crop_h, crop_w, h, w, mean, std=None, stride_rate=2 / 3,
+                  normalize_layer=None, fusion=False):
     ori_h, ori_w, _ = image.shape
     pad_h = max(crop_h - ori_h, 0)
     pad_w = max(crop_w - ori_w, 0)
     pad_h_half = int(pad_h / 2)
     pad_w_half = int(pad_w / 2)
     if pad_h > 0 or pad_w > 0:
-        image = cv2.copyMakeBorder(image, pad_h_half, pad_h - pad_h_half, pad_w_half, pad_w - pad_w_half, cv2.BORDER_CONSTANT, value=mean)
-        target = cv2.copyMakeBorder(target, pad_h_half, pad_h - pad_h_half, pad_w_half, pad_w - pad_w_half, cv2.BORDER_CONSTANT, value=255)
+        image = cv2.copyMakeBorder(image, pad_h_half, pad_h - pad_h_half, pad_w_half, pad_w - pad_w_half,
+                                   cv2.BORDER_CONSTANT, value=mean)
+        target = cv2.copyMakeBorder(target, pad_h_half, pad_h - pad_h_half, pad_w_half, pad_w - pad_w_half,
+                                    cv2.BORDER_CONSTANT, value=255)
 
     new_h, new_w, _ = image.shape
-    stride_h = int(np.ceil(crop_h*stride_rate))
-    stride_w = int(np.ceil(crop_w*stride_rate))
-    grid_h = int(np.ceil(float(new_h-crop_h)/stride_h) + 1)
-    grid_w = int(np.ceil(float(new_w-crop_w)/stride_w) + 1)
+    stride_h = int(np.ceil(crop_h * stride_rate))
+    stride_w = int(np.ceil(crop_w * stride_rate))
+    grid_h = int(np.ceil(float(new_h - crop_h) / stride_h) + 1)
+    grid_w = int(np.ceil(float(new_w - crop_w) / stride_w) + 1)
     prediction_crop = np.zeros((new_h, new_w, classes), dtype=float)
     count_crop = np.zeros((new_h, new_w), dtype=float)
     for index_h in range(0, grid_h):
@@ -260,28 +271,30 @@ def scale_process(model, image, target, classes, crop_h, crop_w, h, w, mean, std
 
             target_crop = target[s_h:e_h, s_w:e_w].copy()
             count_crop[s_h:e_h, s_w:e_w] += 1
-            prediction_crop[s_h:e_h, s_w:e_w, :] += net_process(model, image_crop, target_crop, mean, std)
+            prediction_crop[s_h:e_h, s_w:e_w, :] += net_process(model, image_crop, target_crop, mean, std,
+                                                                normalize_layer, fusion)
     prediction_crop /= np.expand_dims(count_crop, 2)
-    prediction_crop = prediction_crop[pad_h_half:pad_h_half+ori_h, pad_w_half:pad_w_half+ori_w]
+    prediction_crop = prediction_crop[pad_h_half:pad_h_half + ori_h, pad_w_half:pad_w_half + ori_w]
     prediction = cv2.resize(prediction_crop, (w, h), interpolation=cv2.INTER_LINEAR)
     return prediction
 
 
-def test(test_loader, data_list, model, classes, mean, std, base_size, crop_h, crop_w, scales, gray_folder, color_folder, colors):
+def test(test_loader, data_list, model, classes, mean, std, base_size, crop_h, crop_w, scales,
+         gray_folder, color_folder, colors, normalize_layer, fusion=False):
     logger.info('>>>>>>>>>>>>>>>> Start Evaluation >>>>>>>>>>>>>>>>')
     data_time = AverageMeter()
     batch_time = AverageMeter()
     model.eval()
     end = time.time()
     for i, (input, target) in enumerate(test_loader):
-        image_path, _ = data_list[i]
-        image_name = image_path.split('/')[-1].split('.')[0]
-        color_path = os.path.join(color_folder, image_name + '.png')
-
         data_time.update(time.time() - end)
         input = np.squeeze(input.numpy(), axis=0)
         target = np.squeeze(target.numpy(), axis=0)
         image = np.transpose(input, (1, 2, 0))
+        image_path, _ = data_list[i]
+        image_name = image_path.split('/')[-1].split('.')[0]
+
+        color_path = os.path.join(color_folder, image_name + '.png')
 
         h, w, _ = image.shape
         prediction = np.zeros((h, w, classes), dtype=float)
@@ -290,14 +303,15 @@ def test(test_loader, data_list, model, classes, mean, std, base_size, crop_h, c
             new_h = long_size
             new_w = long_size
             if h > w:
-                new_w = round(long_size/float(h)*w)
+                new_w = round(long_size / float(h) * w)
             else:
-                new_h = round(long_size/float(w)*h)
+                new_h = round(long_size / float(w) * h)
 
             image_scale = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
             target_scale = cv2.resize(target.astype(np.uint8), (new_w, new_h), interpolation=cv2.INTER_NEAREST)
 
-            prediction += scale_process(model, image_scale, target_scale, classes, crop_h, crop_w, h, w, mean, std)
+            prediction += scale_process(model, image_scale, target_scale, classes, crop_h, crop_w, h, w,
+                                        mean, std, normalize_layer=normalize_layer, fusion=fusion)
         prediction /= len(scales)
         prediction = np.argmax(prediction, axis=2)
         batch_time.update(time.time() - end)
@@ -325,7 +339,7 @@ def cal_acc(data_list, pred_folder, classes, names):
 
     for i, (image_path, target_path) in enumerate(data_list):
         image_name = image_path.split('/')[-1].split('.')[0]
-        pred = cv2.imread(os.path.join(pred_folder, image_name+'.png'), cv2.IMREAD_GRAYSCALE)
+        pred = cv2.imread(os.path.join(pred_folder, image_name + '.png'), cv2.IMREAD_GRAYSCALE)
         target = cv2.imread(target_path, cv2.IMREAD_GRAYSCALE)
 
         intersection, union, target = intersectionAndUnion(pred, target, classes)
@@ -333,7 +347,7 @@ def cal_acc(data_list, pred_folder, classes, names):
         union_meter.update(union)
         target_meter.update(target)
         accuracy = sum(intersection_meter.val) / (sum(target_meter.val) + 1e-10)
-        logger.info('Evaluating {0}/{1} on image {2}, accuracy {3:.4f}.'.format(i + 1, len(data_list), image_name+'.png', accuracy))
+        logger.info('Evaluating {0}/{1} on image {2}, accuracy {3:.4f}.'.format(i + 1, len(data_list), image_name + '.png', accuracy))
 
     iou_class = intersection_meter.sum / (union_meter.sum + 1e-10)
     accuracy_class = intersection_meter.sum / (target_meter.sum + 1e-10)
